@@ -1,0 +1,65 @@
+with temp as (
+	SELECT
+	s.ORGANIZATION as Organismo,
+	c.FIRSTNAME as NOMBRE,
+	c.LASTNAME as APELLIDO,
+	c.ID_NUMBER as Cedula,
+	s.ORDER_CONTACT_NUMBER as COD_CONTACTO,
+	TO_CHAR(c.BIRTHDATE, 'YYYY-MM-DD') as FECHA_DE_NACIMIENTO,
+	--TO_CHAR(c.BIRTHDATE, 'DD-MM-YY') as FECHA_DE_NACIMIENTO_v1,
+	--TO_CHAR(c.BIRTHDATE, 'YYYY-MM-DD') as FECHA_DE_NACIMIENTO_v2,
+	TO_CHAR(s.REFERENCE_DATE, 'YYYY-MM-DD') as Fecha_Compra,
+	TO_CHAR(s.PRODUCT_DATE_TIME, 'YYYY-MM-DD')  as Fecha_evento,
+	--ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -12) As Fecha_lim,
+	--TO_CHAR(TO_DATE(REPLACE(s.PRODUCT_DATE,'.','/'),'DD/MM/RR'), 'DD-MM-YY') AS Fecha_evento,
+	--TO_CHAR(TO_DATE(REPLACE(s.PRODUCT_DATE,'.','/'),'DD/MM/RR'), 'YYYY') AS Año,
+	c.EMAIL as CORREO,
+	c.NAT_NUMBER_CELLPHONE as MoVIL,
+	CASE 
+		WHEN c.BIRTHDATE IS NULL THEN NULL
+		ELSE FLOOR(MONTHS_BETWEEN(SYSDATE, c.BIRTHDATE) / 12)
+	END AS Edad,
+	CASE 
+		WHEN c.GENDER = 'MALE' THEN 'HOMBRE'
+		WHEN c.GENDER = 'FEMALE' THEN 'MUJER'
+		WHEN c.GENDER = 'UNKNOWN' AND c.ADDRESS_SALUTATION IN ('Mr', 'Señor', 'Señor,', 'Don') THEN 'HOMBRE'
+		WHEN c.GENDER = 'UNKNOWN' AND c.ADDRESS_SALUTATION IN ('Ms','Mrs', 'Miss', 'Señora', 'Señorita') THEN 'MUJER'
+		WHEN c.GENDER = '' AND c.ADDRESS_SALUTATION IN ('Mr', 'Señor', 'Señor,', 'Don') THEN 'HOMBRE'
+		WHEN c.GENDER = '' AND c.ADDRESS_SALUTATION IN ('Ms','Mrs', 'Miss', 'Señora', 'Señorita') THEN 'MUJER'
+		WHEN COALESCE(c.GENDER, '') = '' AND c.ADDRESS_SALUTATION IN ('Mr', 'Señor', 'Señor,', 'Don') THEN 'HOMBRE'
+		WHEN COALESCE(c.GENDER, '') = '' AND c.ADDRESS_SALUTATION IN ('Ms','Mrs', 'Miss', 'Señora', 'Señorita') THEN 'MUJER'
+		WHEN c.GENDER IS NULL AND c.ADDRESS_SALUTATION IN ('Mr', 'Señor', 'Señor,', 'Don') THEN 'HOMBRE'
+		WHEN c.GENDER IS NULL AND c.ADDRESS_SALUTATION IN ('Ms','Mrs', 'Miss', 'Señora', 'Señorita') THEN 'MUJER'
+    ELSE 'SIN DATO'
+	END AS Genero,
+	c.MAIN_ADDR_LINE1 as Direccion, 
+	c.MAIN_ADDR_TOWN as Ciudad_del_cliente,
+	c.MAIN_ADDR_GEO_ZONE as Departamento_del_cliente,
+	c.MAIN_ADDR_COUNTRY as Pais_del_cliente,
+	s.SALES_CHANNEL_TYPE as Canal_de_venta,
+	s.PRODUCT as Evento,
+	s.PROMOTION as Promocion,
+	s.LOGICAL_SEAT_CATEGORY as Categoria_Logica,
+	s.T_SITE_ID as Codigo_del_venue,
+	s.SITE as Venue,
+	NET_SOLD_T_QTY As Boletas_totales,
+	NET_SOLD_C_QTY As Cortesias,
+	NET_SOLD_TKT_AMT_ITX As Recaudo
+	FROM D_SALES_LIST_SALES_V1_0 s
+	  JOIN D_CONTACT_LIST_V1_0 c ON s.T_ORDER_CONTACT_ID = c.T_CONTACT_ID
+	WHERE --s.ORDER_CONTACT_NUMBER IN ('6258518','6987851')
+	  --AND 
+	  s.ORGANIZATION in ('Idartes')
+	--  --AND s.REFERENCE_DATE >= ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -12) 
+	--  CASE
+--       WHEN TO_DATE(s.REFERENCE_DATE, 'YYYY-MM-DD', 'NLS_DATE_LANGUAGE=AMERICAN') IS NOT NULL
+--           AND s.REFERENCE_DATE >= ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -12)
+--       THEN 1
+--       ELSE 0
+--     END = 1
+)
+
+ 
+
+select * 
+from temp
