@@ -1,0 +1,1180 @@
+CREATE OR REPLACE PROCEDURE SAP_resultados_VP_Finanzas_Corporativas.SP_Compras()
+BEGIN
+
+---------------------------------------- PASO 1: VARIABLES Y FUNCIONES ---------------------------------------------
+
+
+--------------------------------------- PASO 2: MODELO RELACIONAL COMPRAS ------------------------------------------- 
+/*
+  PASO 2.1: CREACION MAP TABLES
+
+
+      
+   MAP TABLE FiltroSoc
+   
+   Tablas EXCEL
+        terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Filtros_de_sociedad_Hoja1
+
+*/
+CREATE OR REPLACE TEMP TABLE FiltroSoc As 
+SELECT DISTINCT CAST(sociedad AS STRING) As  sociedad
+FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Filtros_de_sociedad_Hoja1` 
+ORDER BY sociedad;
+
+
+/* 
+   MAP TABLE Map_TipoPosicionPed
+   
+   Tablas SAP
+        terpel-gtic-datalake.SAP_datarefinada.T163Y
+
+*/
+CREATE OR REPLACE TEMP TABLE Map_TipoPosicionPed As 
+SELECT DISTINCT
+  Tipo_de_posicion_PSTYP, 
+  Tipo_de_posicion_EPSTP 
+FROM `terpel-gtic-datalake.SAP_datarefinada.T163Y`
+WHERE Clave_de_idioma = 'S'
+ORDER BY Tipo_de_posicion_PSTYP;
+--select * from Map_TipoPosicionPed
+
+
+/* 
+   MAP TABLE MAP_FactorImporte
+   
+   Tablas EXCEL
+        terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Factor_Monedas_Sheet1
+
+*/
+CREATE OR REPLACE TEMP TABLE MAP_FactorImporte As 
+SELECT DISTINCT 
+  Moneda,
+  ConversionAmount 
+FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Factor_Monedas_Sheet1`
+ORDER BY Moneda;
+select * from MAP_FactorImporte;
+
+/* 
+   MAP TABLE MAP_CondicionPago
+   
+   Tablas maestras
+        terpel-gtic-datalake.SAP_resultados.Maestro_CondicionesPago
+
+*/
+CREATE OR REPLACE TEMP TABLE MAP_CondicionPago As 
+SELECT DISTINCT
+  Condiciones_de_pago, 
+  Aclaracion_propia 
+FROM `terpel-gtic-datalake.SAP_resultados.Maestro_CondicionesPago` 
+ORDER BY Condiciones_de_pago;
+
+
+/* 
+   MAP TABLE MAP_TRM
+   
+   Tablas maestras
+        terpel-gtic-datalake.SAP_resultados.Maestro_TRM
+
+*/
+CREATE OR REPLACE TEMP TABLE MAP_TRM As 
+SELECT DISTINCT
+  CONCAT (Moneda_de_destino,UNIX_DATE(Valido_de)) As MAPIN_TRM,
+  Valido_de,
+  Tipo_de_cambio As MAPOUT_TRM
+FROM SAP_resultados.Maestro_TRM
+--WHERE UNIX_DATE(MAPIN_TRM) >0
+--WHERE EXTRACT(YEAR FROM Valido_de) >=2007
+ORDER BY Valido_de;
+
+
+/* 
+   MAP TABLE MAP_Usuarios
+   
+   Tablas SAP
+        terpel-gtic-datalake.SAP_datarefinada.USER_ADDRP
+
+*/
+CREATE OR REPLACE TEMP TABLE MAP_Usuarios As 
+SELECT DISTINCT
+  Usuarios, 
+  Nombre_completo 
+FROM `terpel-gtic-datalake.SAP_datarefinada.USER_ADDRP`
+ORDER BY Usuarios;
+
+
+/* 
+   MAP TABLE MAP_FiltroNecesidad
+   
+   Tablas EXCEL
+        terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Filtros_de_grupo_Filtro_Necesidades
+
+*/
+CREATE OR REPLACE TEMP TABLE MAP_FiltroNecesidad As 
+SELECT DISTINCT
+  CONCAT('PH' ,Necesidades_Excluidas) As Necesidades_Excluidas,
+  'No' As NoField
+FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Filtros_de_grupo_Filtro_Necesidades`
+ORDER BY Necesidades_Excluidas;
+
+
+/* 
+   MAP TABLE MAP_Direccion
+   
+   Tablas EXCEL
+        terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Configuracion_VicePresidencia_Configuracion
+
+*/
+CREATE OR REPLACE TEMP TABLE MAP_Direccion As 
+SELECT DISTINCT
+  NECESIDAD, 
+  --DIRECCION
+  LAST_VALUE(DIRECCION IGNORE NULLS ) OVER(PARTITION BY NECESIDAD 
+                                           ORDER BY NECESIDAD, DIRECCION
+                                           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) As DIRECCION
+FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Configuracion_VicePresidencia_Configuracion`
+ORDER BY NECESIDAD;
+
+
+/* 
+   MAP TABLE MAP_VP
+   
+   Tablas EXCEL
+        terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Configuracion_VicePresidencia_Configuracion
+
+*/
+CREATE OR REPLACE TEMP TABLE MAP_VP As 
+SELECT DISTINCT
+  NECESIDAD, 
+  --VP
+  FIRST_VALUE(VP IGNORE NULLS ) OVER(PARTITION BY NECESIDAD 
+                                           ORDER BY NECESIDAD, VP
+                                           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) As VP
+FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Configuracion_VicePresidencia_Configuracion`
+ORDER BY NECESIDAD;
+
+
+/* 
+   MAP TABLE MAP_GrupoCompras
+   
+   Tablas SAP
+        terpel-gtic-datalake.SAP_datarefinada.T024
+
+*/
+CREATE OR REPLACE TEMP TABLE MAP_GrupoCompras As 
+SELECT DISTINCT
+  Grupo_de_compras,
+  Denominacion_GrpComp
+FROM `terpel-gtic-datalake.SAP_datarefinada.T024`
+ORDER BY Grupo_de_compras;
+
+
+/* 
+   MAP TABLE MAP_ClasePedido
+   
+   Tablas EXCEL
+        terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_TipoPedido_Hoja1
+
+*/
+CREATE OR REPLACE TEMP TABLE MAP_ClasePedido As 
+SELECT DISTINCT
+  ClasePedido, 
+  NombreClase
+FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_TipoPedido_Hoja1`
+ORDER BY ClasePedido;
+
+
+
+/*
+  PASO 2.2: CREACIÓN DE LA TABLA SOLPED
+
+      Tablas transaccionales
+          terpel-gtic-datalake.SAP_datarefinada.EBAN
+      Tablas EXCEL
+          terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Filtros_de_grupo_GC_Compra
+          terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Configuracion_FiltroClasePedido_Configuracion
+
+
+--
+   2.2.1 MAP TABLE FiltroClaseSolPed
+   
+   Tablas EXCEL
+        terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Configuracion_FiltroClaseSolicitud_Configuracion
+
+*/
+CREATE OR REPLACE TEMP TABLE FiltroClaseSolPed As 
+SELECT DISTINCT
+  ClaseSolicitud
+FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Configuracion_FiltroClaseSolicitud_Configuracion`
+WHERE Filtro = 1
+ORDER BY ClaseSolicitud;
+
+
+/* 
+   2.2.2 MAP TABLE FiltroClasePedido
+   
+   Tablas EXCEL
+        terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Filtros_de_grupo_GC_SolPed
+
+*/
+CREATE OR REPLACE TEMP TABLE FiltroGCSP As 
+SELECT DISTINCT
+  CAST(GC_Solped AS STRING) As GC_Solped
+FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Filtros_de_grupo_GC_SolPed`
+ORDER BY GC_Solped;
+
+
+
+/* 
+   2.2.3 TABLA FECHA LIBERACION SOLPED
+   
+   Tablas SAP
+        terpel-gtic-datalake.SAP_datarefinada.CDPOS
+        terpel-gtic-datalake.SAP_datarefinada.CDHDR
+
+*/
+CREATE OR REPLACE TEMP TABLE Fecha_Liber_SolPed As 
+WITH CDPOS_EXT As (
+  SELECT 
+    CONCAT(A.N__documento, '|', A.Clave_tabla) As oKeyCDPOS,
+    A.Mandante,
+    A.Clave_tabla,  -- TABKEY
+    A.Objeto_documento_modificacion, --OBJECTCLAS
+    A.N__documento,  --CHANGENR
+    A.Nombre_campo, --FNAME
+    A.ID_modificacion, --CHNGID
+    A.Valor_nuevo, -- VALUE_NEW
+    B.Usuario,
+    B.Fecha,
+    B.Hora
+  FROM `terpel-gtic-datalake.SAP_datarefinada.CDPOS` A
+  INNER JOIN `terpel-gtic-datalake.SAP_datarefinada.CDHDR` B
+    ON(A.N__documento = B.N__documento)
+  WHERE A.Objeto_documento_modificacion = 'BANF'
+    AND A.Nombre_campo = 'FRGKZ'
+    AND A.ID_modificacion = 'U'
+    AND A.Valor_nuevo = '2'
+    AND B.Objeto_documento_modificacion = 'BANF'
+  ORDER BY oKeyCDPOS),
+  
+  CDPOS_TRA As (
+  SELECT
+    Clave_tabla,
+    Usuario As Usuario_liberador_solped,
+    DATETIME(Fecha, Hora) As FechaHora,
+    DATE(Fecha) As Fecha_liberacion_solped,
+    TIME(Hora) As Hora,
+    MAX(DATETIME(Fecha, Hora)) OVER(PARTITION BY Clave_tabla
+                                    ORDER BY Clave_tabla, DATETIME(Fecha, Hora)
+                                    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) As FechaMax 
+  FROM CDPOS_EXT
+  ORDER BY Clave_tabla, FechaHora) 
+
+SELECT DISTINCT 
+  Clave_tabla,
+  Usuario_liberador_solped,
+  Fecha_liberacion_solped
+FROM CDPOS_TRA
+WHERE FechaHora = FechaMax
+ORDER BY Clave_tabla;
+
+--SELECT * FROM Fecha_Liber_SolPed ORDER BY Clave_tabla;
+
+
+
+/* 
+   2.2.4 TABLA SOLPED
+   
+   Tablas transaccionales
+        terpel-gtic-datalake.SAP_datarefinada.EBAN
+
+*/
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_SolPed_temp As 
+WITH SolPed_temp As (
+  SELECT  
+    Solicitud_de_pedido As Numero_SolPed,  --BANFN
+    Pos_solicitud_pedido As PosicionSolPed,   --BNFPO
+    Stat_trat_sol_ped_ As Status_tratamiento,  --BANPR
+    CONCAT(Solicitud_de_pedido, '|',Pos_solicitud_pedido) As KeySolPed,
+    CONCAT(Mandante, Solicitud_de_pedido,FORMAT('%05d', CAST(Pos_solicitud_pedido As INT64))) As Clave_tabla,
+    Creado_por As Creador_Id_SolPed,  --ERNAM
+    A.Necesidad,  --BEDNR
+    Tipo_Proceso,  --AFNAM
+    DATE(Fecha_de_solicitud) As Fecha_de_solicitud,   --BADAT
+    EXTRACT(YEAR FROM SAFE_CAST(Fecha_de_solicitud As DATE)) As Anio_SolPed,
+    EXTRACT(MONTH FROM SAFE_CAST(Fecha_de_solicitud As DATE)) As Mes_SolPed,
+    CONCAT(FORMAT_DATE('%b', SAFE_CAST(Fecha_de_solicitud As DATE)), ' ', EXTRACT(YEAR FROM SAFE_CAST(Fecha_de_solicitud As DATE))) As MesAnio_SolPed,
+    A.Moneda As Moneda_SolPed, -- WAERS
+    Clase_documento As Clase_solicitud, --BSART
+    Grupo_de_compras, --EKGRP
+    Adm_Interno As Adm_Interno_SolPed, --IDNLF
+    Tipo_de_imputacion, --KNTTP
+    Indicador_de_borrado As Indicador_borrado_SolPed,  --LOEKZ
+    Grupo_de_articulos, --MATKL
+    REPLACE(LTRIM(REPLACE(Material, '0', ' ')), ' ', '0') as Material_SolPed, --MATNR
+    Cantidad_solicitada As Cantidad_SolPed, --MENGE
+    Precio_de_valoracion, --PREIS
+    --CAST(REPLACE(Cantidad_solicitada,',','.') As NUMERIC) As Cantidad_solicitada, --MENGE
+    Cantidad_solicitada, --MENGE
+    Tipo_de_posicion, --PSTYP
+    Status_tratamiento As Status_Id_SolPed,  -- STATU
+    Texto_breve As Texto_breve_SolPed,  --TXZ01,
+    Centro As Centro_SolPed -- WERKS
+  FROM `terpel-gtic-datalake.SAP_datarefinada.EBAN` A
+  --FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_EBAN` A
+  INNER JOIN FiltroClaseSolPed
+    ON (Clase_documento = ClaseSolicitud)
+  INNER JOIN FiltroGCSP
+    ON (Grupo_de_compras = GC_Solped)
+  WHERE EXTRACT(YEAR FROM SAFE_CAST(Fecha_de_solicitud As DATE)) >= 2016
+    AND (A.Indicador_de_borrado NOT IN ('X','x') OR A.Indicador_de_borrado IS NULL)
+  ORDER BY KeySolPed),
+
+  SolPed_temp2 As (
+  SELECT  
+    Numero_SolPed,
+    PosicionSolPed,
+    Status_tratamiento,
+    KeySolPed,
+    Clave_tabla,
+    IFNULL(B.Nombre_completo, 'NA') As Creador_SolPed,
+    Creador_Id_SolPed,
+    A.Necesidad,
+    IFNULL(C.DIRECCION, 'Sin Asignar') As Direccion_SolPed,
+    IFNULL(D.VP, 'Sin Asignar') As Vicepresidencia_SolPed,
+    Tipo_Proceso,
+    Fecha_de_solicitud,
+    Anio_SolPed,
+    Mes_SolPed,
+    MesAnio_SolPed,
+    Moneda_SolPed,
+    IFNULL(E.MAPOUT_TRM, 1) As TRM_SolPed,
+    Clase_solicitud,
+    Grupo_de_compras,
+    Adm_Interno_SolPed,
+    Tipo_de_imputacion,
+    Indicador_borrado_SolPed,
+    Grupo_de_articulos,
+    Material_SolPed,
+    Cantidad_solicitada As Cantidad_SolPed,
+    Precio_de_valoracion As ValSolped,
+    Precio_de_valoracion * IFNULL(F.ConversionAmount, 1) As Val_unit_SolPed,
+    Cantidad_solicitada * (Precio_de_valoracion * IFNULL(F.ConversionAmount, 1)) As Val_Neto_SolPed,
+    G.Tipo_de_posicion_EPSTP As Tipo_Posicion_EBAN,
+    Status_Id_SolPed,
+    Texto_breve_SolPed,
+    Centro_SolPed
+  FROM SolPed_temp A
+  LEFT JOIN MAP_Usuarios B
+    ON (A.Creador_Id_SolPed = B.Usuarios)
+  LEFT JOIN MAP_Direccion C
+    ON (A.Necesidad = C.NECESIDAD)
+  LEFT JOIN MAP_VP D
+    ON (A.Necesidad = D.NECESIDAD)
+  LEFT JOIN MAP_TRM E
+    ON (CONCAT(A.Moneda_SolPed, UNIX_DATE(DATE(Fecha_de_solicitud))) = E.MAPIN_TRM)
+  LEFT JOIN MAP_FactorImporte F
+    ON (A.Moneda_SolPed = F.Moneda)
+  LEFT JOIN Map_TipoPosicionPed G
+    ON (A.Tipo_de_posicion = G.Tipo_de_posicion_PSTYP)
+  ORDER BY KeySolPed)
+
+SELECT 
+  A.*,
+  Val_Neto_SolPed * TRM_SolPed as Valor_Solped_COP,
+  B.Usuario_liberador_solped,
+  B.Fecha_liberacion_solped
+FROM SolPed_temp2 A
+LEFT JOIN Fecha_Liber_SolPed B 
+  ON (A.Clave_tabla = B.Clave_tabla)
+ORDER BY KeySolPed;
+
+
+
+
+/*
+  PASO 2.3: CREACIÓN DE LA TABLA CABECERA PEDIDOS
+
+      Tablas transaccionales
+          terpel-gtic-datalake.SAP_datarefinada.EKKO
+      Tablas EXCEL
+          terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Filtros_de_grupo_GC_Compra
+          terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Configuracion_FiltroClasePedido_Configuracion
+      Tablas SAP
+          SAP_datarefinada.CDHDR
+
+
+   2.3.1 MAP TABLE Map_Area_GrupoCompras
+   
+   Tablas EXCEL
+        terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Filtros_de_grupo_GC_Compra
+
+*/
+CREATE OR REPLACE TEMP TABLE Map_Area_GrupoCompras As 
+SELECT DISTINCT
+  CAST(GC_Compra AS STRING) As MapIn_Area_GrupoCompras,
+  AREA As MapOut_Area_GrupoCompras
+FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Filtros_de_grupo_GC_Compra` 
+ORDER BY MapIn_Area_GrupoCompras;
+
+
+/* 
+   2.3.2 MAP TABLE FiltroClasePedido
+   
+   Tablas EXCEL
+        terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Configuracion_FiltroClasePedido_Configuracion
+
+*/
+CREATE OR REPLACE TEMP TABLE FiltroClasePedido As 
+SELECT DISTINCT CAST(ClasePedidoContrato AS STRING) As  ClasePedidoContrato 
+FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Configuracion_FiltroClasePedido_Configuracion` 
+WHERE Filtro = 1
+ORDER BY ClasePedidoContrato;
+
+
+/* 
+   2.3.3 MAP TABLE FiltroGCCM
+   
+   Tablas EXCEL
+        terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Filtros_de_grupo_GC_Compra
+
+*/
+CREATE OR REPLACE TEMP TABLE FiltroGCCM As 
+SELECT DISTINCT CAST(GC_Compra AS STRING) As  GC_Compra  
+FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Filtros_de_grupo_GC_Compra`
+ORDER BY GC_Compra;
+
+
+
+/* 
+   2.3.4 TABLA FECHA LIBERACION SOLPED
+   
+   Tablas SAP
+        terpel-gtic-datalake.SAP_datarefinada.CDHDR
+
+*/
+CREATE OR REPLACE TEMP TABLE Fecha_Liber_Pedido As 
+WITH CDHDR_EXT As (
+  SELECT DISTINCT
+    Mandante,
+    Valor_de_objeto,
+    Codigo_transaccion,
+    Usuario,
+    Fecha,
+    Hora,
+    N__documento,
+    Objeto_documento_modificacion
+  FROM `terpel-gtic-datalake.SAP_datarefinada.CDHDR` 
+  WHERE Codigo_transaccion IN ('ME28','ME29','ME35K')
+ -- La siguiente condicion solo aplica a generar CDPOS, o la resultante será cero.
+    --AND Objeto_documento_modificacion = 'BANF'
+  ORDER BY Valor_de_objeto),
+  
+  CDHDR_TRA As (
+  SELECT
+    Valor_de_objeto,
+    Usuario As Usuario_liberador_primer_nivel,
+    DATETIME(Fecha, Hora) As FechaHora,
+    DATE(Fecha) As Fecha_liberacion_primer_nivel,
+    TIME(Hora) As Hora,
+    MIN(DATETIME(Fecha, Hora)) OVER(PARTITION BY Valor_de_objeto
+                                    ORDER BY Valor_de_objeto, DATETIME(Fecha, Hora)
+                                    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) As FechaMin
+  FROM CDHDR_EXT
+  ORDER BY Valor_de_objeto, FechaHora)
+
+SELECT DISTINCT 
+  Valor_de_objeto,
+  Usuario_liberador_primer_nivel,
+  Fecha_liberacion_primer_nivel
+FROM CDHDR_TRA
+WHERE FechaHora = FechaMin
+ORDER BY Valor_de_objeto;
+
+--SELECT * FROM Fecha_Liber_Pedido ORDER BY Valor_de_objeto;
+
+
+/* 
+   2.3.5 TABLA CABECERA PEDIDOS
+   
+   Tablas transaccionales
+        terpel-gtic-datalake.SAP_datarefinada.EKKO
+
+*/
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_PedidosCabecera As 
+WITH PedidosCabecera_temp As (
+  SELECT  
+    A.Sociedad,	--BUKRS,
+    Documento_compras,	--EBELN,
+    Condiciones_de_pago,	--ZTERM,
+    Tp_documento_compras,	--BSTYP,
+    Cl_documento_compras,	--BSART,
+    Status,	--STATU,
+    Proveedor,	--LIFNR,
+    Grupo_de_compras,	--EKGRP,
+    Moneda,	--WAERS,
+    Tipo_cambio_moneda,	--WKURS,
+    Fecha_documento,	--BEDAT,
+    In_periodo_validez,	--KDATB,
+    Fin_Per_Validez,	--KDATE,
+    Contrato_marco,	--KONNR,
+    Val_prev__niv_cab__,	--KTWRT,
+    Proceso,	--SUBMI,
+    Grupo_de_liberacion,	--FRGGR,
+    Estrategia_liberac_,	--FRGSX,
+    Ind_liberacion,	--FRGKE,
+    Creado_por	--ERNAM
+  FROM `terpel-gtic-datalake.SAP_datarefinada.EKKO` A
+  INNER JOIN FiltroSoc B
+    ON (A.Sociedad = B.sociedad)
+
+  INNER JOIN FiltroClasePedido C
+    ON (Cl_documento_compras = ClasePedidoContrato)
+  INNER JOIN FiltroGCCM
+    ON (Grupo_de_compras = GC_Compra)
+
+  ORDER BY Documento_compras),
+
+  PedidosCabecera_temp2 As (
+  SELECT 
+    A.Sociedad,
+    Documento_compras As Pedido,
+    Documento_compras As Pedido_tmp_EKKO,
+    A.Condiciones_de_pago As Condicion_pago_Id,
+    Proveedor,
+    A.Condiciones_de_pago,
+    IFNULL(B.Aclaracion_propia, 'Sin condicion de pago') As Condicion_pago_nombre,
+    Tp_documento_compras As Tipo_documento_compras,
+    Cl_documento_compras As Clase_PedidoContrato,
+    Status As Status_documento_compras,
+    A.Grupo_de_compras, 
+    IFNULL(C.NombreClase, 'Sin asignar') As NombreClasePedido,
+    IFNULL(D.Denominacion_GrpComp, 'Sin asignar') As Grupo_compras_nombre,
+    IFNULL(E.MapOut_Area_GrupoCompras, 'Sin asignar') As AREA,
+    Moneda As Moneda_pedido,
+    Tipo_cambio_moneda TRM_pedido_cabecera,
+    SAFE_CAST(Fecha_documento As DATE) As Fecha_pedido,
+    UNIX_DATE(SAFE_CAST(Fecha_documento As DATE)) As oCalendarioKey,
+    EXTRACT(YEAR FROM SAFE_CAST(Fecha_documento As DATE)) As Anio_pedido,
+    EXTRACT(MONTH FROM SAFE_CAST(Fecha_documento As DATE)) As Mes_pedido,
+    SAFE_CAST(In_periodo_validez As DATE) As Fecha_inicio_vigencia_pedido,
+    SAFE_CAST(Fin_Per_Validez As DATE) As Fecha_fin_vigencia_pedido,
+    EXTRACT(YEAR FROM SAFE_CAST(Fin_Per_Validez As DATE)) As Anio_fin_validez,
+    EXTRACT(MONTH FROM SAFE_CAST(Fin_Per_Validez As DATE)) As Mes_fin_validez,
+    DATE_DIFF(SAFE_CAST(Fin_Per_Validez As DATE), CURRENT_DATE('UTC-5'), DAY) As Dias_fin_vigencia,
+    IFNULL(F.MAPOUT_TRM,1) As TRM_pedido,
+    Contrato_marco As SaldoContrato_PorGestionar_PorPosicion_EKKO,
+    Val_prev__niv_cab__ As ValorPrevisto_AreaCabecera_PorDistrib,
+    Proceso,
+    Grupo_de_liberacion As  Grupo_de_liberador,
+    Estrategia_liberac_ As Estrategia_liberacion,
+    Ind_liberacion As Status_Indicador_Liberacion,
+    Creado_por As Creador_pedido
+  FROM PedidosCabecera_temp A
+  LEFT JOIN MAP_CondicionPago B
+    ON (A.Condiciones_de_pago = B.Condiciones_de_pago)
+  LEFT JOIN MAP_ClasePedido C
+    ON (A.Cl_documento_compras = C.ClasePedido)
+  LEFT JOIN MAP_GrupoCompras D
+    ON (A.Grupo_de_compras = D.Grupo_de_compras)
+  LEFT JOIN Map_Area_GrupoCompras E
+    ON (A.Grupo_de_compras = E.MapIn_Area_GrupoCompras)
+  LEFT JOIN MAP_TRM F
+    ON (CONCAT(A.Moneda, UNIX_DATE(DATE(Fecha_documento))) = F.MAPIN_TRM)
+  ORDER BY Pedido, Fecha_pedido)
+
+SELECT 
+  A.*,
+  B.Usuario_liberador_primer_nivel,
+  B.Fecha_liberacion_primer_nivel
+FROM PedidosCabecera_temp2 A
+LEFT JOIN Fecha_Liber_Pedido B 
+  ON (A.Pedido = B.Valor_de_objeto)
+ORDER BY Pedido, Fecha_pedido;
+
+
+
+/* 
+   2.3.6 TABLA DIAS VIGENCIA PEDIDO
+   
+   Tablas transaccionales
+        SAP_resultados_VP_Finanzas_Corporativas.Compras_PedidosCabecera
+   Tablas EXCEL
+        SAP_archivos_maestros_datarefinada.Compras_Segmentos_dias_de_vigencia_Vigencia
+
+*/
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_DiasVigenciaPedido As
+  SELECT DISTINCT
+      Dias_fin_vigencia,
+      DiaIni,
+      DiaFin,
+      Segmento
+    FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_PedidosCabecera
+    CROSS JOIN `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Compras_Segmentos_dias_de_vigencia_Vigencia`  
+    WHERE Dias_fin_vigencia BETWEEN DiaIni AND DiaFin
+    ORDER BY Dias_fin_vigencia;
+
+
+/* 
+  2.3.7 MAP TABLES ADICIONALES DE CABECERA PEDIDOS
+
+  Tablas EXCEL
+      SAP_archivos_maestros_datarefinada.Compras_Segmentos_dias_de_vigencia_Vigencia
+
+*/
+CREATE OR REPLACE TEMP TABLE MAP_PedidoMon As 
+SELECT DISTINCT 
+  Pedido,
+  Moneda_pedido 
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_PedidosCabecera
+ORDER BY Pedido;
+
+
+CREATE OR REPLACE TEMP TABLE MAP_PedidoTipo As 
+SELECT DISTINCT 
+  Pedido,
+  Tipo_documento_compras 
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_PedidosCabecera
+ORDER BY Pedido;
+
+
+CREATE OR REPLACE TEMP TABLE MAP_PedidoClase As 
+SELECT DISTINCT 
+  Pedido,
+  Clase_PedidoContrato 
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_PedidosCabecera
+ORDER BY Pedido;
+
+
+
+/* 
+  2.4 TABLA PEDIDOS TEMP
+   
+   Tablas transaccionales
+        terpel-gtic-datalake.SAP_datarefinada.EKPO
+
+*/
+-- Temporal 1
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos_temp1 As  
+WITH solpedDistinct As (
+  SELECT DISTINCT 
+    CAST(Numero_SolPed As STRING) As Numero_SolPed
+  FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_SolPed_temp
+  ),
+
+  Pedidos_temp As (
+  SELECT  
+    Documento_compras,	-- EBELN,
+    Posicion,	-- EBELP,
+    Solicitud_de_pedido,	-- BANFN,
+    A.Necesidad,	-- BEDNR,
+    Pos_solicitud_pedido,	-- BNFPO,
+    A.Sociedad,	-- BUKRS,
+    Adm_Interno,	-- IDNLF,
+    Confirmacion_pedido,	-- LABNR,
+    Indicador_de_borrado,	-- LOEKZ,
+    Cantidad_prevista,	-- KTMNG,
+    Cantidad_de_pedido,	-- MENGE,
+    Indicador_impuestos,	-- MWSKZ,
+    Precio_neto_pedido,	-- NETPR,
+    N__paquete,	-- PACKNO,
+    Tipo_de_posicion,	-- PSTYP,
+    Centro,	-- WERKS,
+    Contrato_marco,	-- KONNR,
+    Pos_contrato_sup_,	-- KTPNR,
+    REPLACE(LTRIM(REPLACE(Material, '0', ' ')), ' ', '0') As Material	-- MATNR
+  FROM `terpel-gtic-datalake.SAP_datarefinada.EKPO` A
+
+  INNER JOIN SAP_resultados_VP_Finanzas_Corporativas.Compras_PedidosCabecera B
+    ON (A.Sociedad = B.Sociedad
+      AND A.Documento_compras = B.Pedido) 
+  INNER JOIN solpedDistinct C
+    ON (A.Solicitud_de_pedido =  C.Numero_SolPed)
+     -- AND A.Pos_solicitud_pedido = C.PosicionSolPed  )
+  )
+
+  SELECT 
+    Documento_compras,
+    Sociedad,
+    Posicion,
+    Documento_compras As Numero_Pedido,
+    Posicion As Posicion_Pedido,
+    CONCAT(Documento_compras,'|',Posicion) As oPedidoItem,
+    CONCAT(Documento_compras,'|',Posicion) As oEntregas,
+    CONCAT(Documento_compras,'|',Posicion) As oHistorico,
+    CONCAT(IFNULL(Solicitud_de_pedido,'N-A'),'|',IFNULL(Pos_solicitud_pedido,-1)) As oKeySolPed,
+    CONCAT(Documento_compras,'|',Posicion) As oPlanEntregas,
+    Solicitud_de_pedido As oSolPed,
+    IFNULL(B.Clase_PedidoContrato,'1') As Clase_PedidoContrato,
+    IFNULL(C.NoField,'Si') As Filtro_Necesidad,
+    A.Necesidad As Necesidad_PC,
+    IFNULL(D.DIRECCION , 'Sin Asignar') As Direccion_Pedido,
+    IFNULL(E.VP , 'Sin Asignar') As Vicepresidencia_Pedido,
+    Sociedad As oSociedad,
+    Adm_Interno As Adm_Interno_Pedido_Compra,
+    Confirmacion_pedido,
+    Indicador_de_borrado,
+    Material As Material_Pedido,
+    Indicador_impuestos,
+    Contrato_marco,
+    Pos_contrato_sup_,
+    Cantidad_prevista,
+    Cantidad_de_pedido,
+    IF(B.Clase_PedidoContrato IN ('MK', 'WK'), Cantidad_prevista, Cantidad_de_pedido) As Cantidad_Pedido,
+    IFNULL(F.Moneda_pedido,'1') As Moneda_Pedido,
+    G.ConversionAmount,
+    Precio_neto_pedido,
+    Precio_neto_pedido * IFNULL(G.ConversionAmount, 1) As Val_Unid_Pedido,
+    IF(B.Clase_PedidoContrato IN ('MK', 'WK'), Cantidad_prevista, Cantidad_de_pedido) * 
+      Precio_neto_pedido * IFNULL(G.ConversionAmount, 1) As    Val_Neto_Pedido,
+    N__paquete As Paquete_tmp_EKPO,
+    Tipo_de_posicion,
+    Centro As IdCentro,
+    IF(Tipo_de_posicion = '9', N__paquete, NULL) As N__paquete 
+  FROM Pedidos_temp A
+  LEFT JOIN MAP_PedidoClase B
+    ON (A.Documento_compras = B.Pedido)
+  LEFT JOIN MAP_FiltroNecesidad C
+    ON (CONCAT(IFNULL(B.Clase_PedidoContrato,'1'), A.Necesidad) = C.Necesidades_Excluidas)
+  LEFT JOIN MAP_Direccion D
+    ON (A.Necesidad = D.NECESIDAD)
+  LEFT JOIN MAP_VP E
+    ON (A.Necesidad = E.NECESIDAD)
+  LEFT JOIN MAP_PedidoMon F
+    ON (A.Documento_compras = F.Pedido)
+  LEFT JOIN MAP_FactorImporte G 
+    ON (F.Moneda_pedido = G.Moneda)
+  WHERE Tipo_de_posicion IN ('0','9','3','2')
+  ORDER BY A.Sociedad, A.Documento_compras, A.Posicion;
+
+
+-- Temporal 2
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos_temp2 As 
+-- unir al pedido el primer código para encontar el servicio
+WITH ESLL1 As (
+  SELECT DISTINCT
+    A.N__paquete,
+    A.Paquete
+  FROM `terpel-gtic-datalake.SAP_datarefinada.ESLL` A
+  INNER JOIN SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos_temp1 B
+    ON (A.N__paquete = B.N__paquete)
+  ORDER BY N__paquete)
+
+SELECT 
+  A.*,
+  B.Paquete 
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos_temp1 A 
+LEFT JOIN ESLL1 B 
+  ON (A.N__paquete = B.N__paquete)
+ORDER BY A.Sociedad, A.Documento_compras, A.Posicion;
+
+
+
+-- Aqui creamos la tabla Pedidos_temp principal.
+
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos_temp As 
+-- Asociar al pedido el segundo código para encontrar el servicio
+WITH ESLL AS (
+  SELECT DISTINCT
+    A.N__paquete As Paquete,
+    CAST(Numero_de_linea AS STRING) As Numero_de_linea,
+    A.Numero_de_servicio,
+    REPLACE(LTRIM(REPLACE(A.Numero_de_servicio, '0', ' ')), ' ', '0') As Codigo_Servicio,
+    D.Texto_breve_serv_
+  FROM `terpel-gtic-datalake.SAP_datarefinada.ESLL` A
+  INNER JOIN SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos_temp2 B
+    ON (A.N__paquete = B.Paquete)
+  -- Asociar el texto del servicio a su código correspondiente
+  LEFT JOIN ( SELECT DISTINCT  
+                Numero_de_servicio, 
+                Texto_breve_serv_
+              FROM `terpel-gtic-datalake.SAP_datarefinada.ASMDT`
+              WHERE Clave_de_idioma = 'S'
+              ORDER BY Numero_de_servicio )  D 
+    ON (A.Numero_de_servicio = D.Numero_de_servicio)
+  WHERE A.Numero_de_linea = 10
+  ORDER BY A.N__paquete)
+
+SELECT DISTINCT 
+  A.*,
+  C.Numero_de_linea, 
+  C.Codigo_Servicio As Codigo_Servicio_pedido,
+  C.Texto_breve_serv_ As Nombre_Servicio_Pedido 
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos_temp2 A 
+LEFT JOIN ESLL C 
+  ON (A.Paquete = C.Paquete)
+--WHERE Numero_de_linea IN ('0000000010', '10')
+ORDER BY A.Sociedad, A.Documento_compras, A.Posicion;
+
+
+
+/* 
+  2.5 TABLA PEDIDOS
+
+  Tablas transaccionales
+      SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos_temp
+      SAP_resultados_VP_Finanzas_Corporativas.Compras_PedidosCabecera
+
+*/
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos2 As 
+SELECT 
+  A.*, 
+  B.* EXCEPT(Sociedad, Pedido, Clase_PedidoContrato, Moneda_pedido ),
+  A.Val_Neto_Pedido * B.TRM_pedido As Valor_Pedido_COP
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos_temp A
+INNER JOIN SAP_resultados_VP_Finanzas_Corporativas.Compras_PedidosCabecera B
+  ON (A.Sociedad = B.Sociedad
+    AND A.Numero_Pedido = B.Pedido)
+ORDER BY Sociedad, Numero_Pedido;
+
+
+/* 
+  2.5.1 MAESTRO PEDIDO PRINCIPAL TEMP
+
+  Tablas transaccionales
+      SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos
+
+*/
+CREATE OR REPLACE TEMP TABLE Compras_PedidoPrincipal As 
+SELECT DISTINCT
+  Documento_compras As Numero_pedido_marco,
+  Posicion As Posicion_pedido_marco,
+  Documento_compras As KONNR_P,
+  Posicion As KTPNR_P
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos2
+WHERE Contrato_marco IS NULL OR 
+  CHAR_LENGTH(Contrato_marco) <=1
+ORDER BY Documento_compras, Posicion;
+
+
+
+/* 
+  2.6 TABLA ENTREGAS
+
+  Tablas transaccionales
+      SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos_temp
+      SAP_resultados_VP_Finanzas_Corporativas.Compras_PedidosCabecera
+
+*/
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_Entregas As 
+SELECT 
+  CONCAT(Contrato_marco,'|',Pos_contrato_sup_) As oEntregas,
+  oKeySolPed, -- se agrego el 2021-12-10 DATR
+  A.Documento_compras As Numero_pedido_entregado,
+  A.Posicion As Posicion_pedido_entregado,
+  Contrato_marco as Numero_pedido_principal,
+  Pos_contrato_sup_ As Posicion_pedido_principal,
+  Fecha_pedido As Fecha_PedidoContrato_Entrega,
+  CONCAT(FORMAT_DATE('%b', Fecha_pedido),'_',Anio_pedido ) As AnioMes_entrega,
+  Anio_pedido As Anio_entrega,
+  Mes_pedido As Mes_entrega,
+  FORMAT_DATE('%b', Fecha_pedido) As Mes_entrega_nombre,
+  TRM_pedido As TRM_pedido_entregado,
+  Dias_fin_vigencia As Dias_fin_vigencia_entrega,
+  Val_Unid_Pedido As Val_Unid_Pedido_entregado,
+  Val_Neto_Pedido As Val_Neto_Pedido_entregado,
+  Material_Pedido As Material_entrega,
+  Indicador_de_borrado As Indicador_de_borrado_entrega,
+  Clase_PedidoContrato  As Clase_PedidoContrato_entrega,
+  '' As Origen,
+  Val_Neto_Pedido * TRM_Pedido as Valor_Entrega_COP
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos2 A
+INNER JOIN Compras_PedidoPrincipal B  
+  ON(A.Contrato_marco = B.KONNR_P
+    AND A.Pos_contrato_sup_ = B.KTPNR_P)
+ORDER BY oEntregas, oKeySolPed;
+
+
+
+INSERT INTO Compras_PedidoPrincipal
+SELECT DISTINCT 
+  Numero_pedido_principal As Numero_pedido_marco,
+  Posicion_pedido_principal As Posicion_pedido_marco,
+  Numero_pedido_entregado As KONNR_P,
+  Posicion_pedido_entregado As KTPNR_P
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_Entregas
+WHERE LENGTH(Numero_pedido_entregado) >= 2
+ORDER BY Numero_pedido_marco, Posicion_pedido_marco;
+
+--select* from Compras_PedidoPrincipal ;
+
+
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos As 
+SELECT 
+  A.*, 
+  B.Numero_pedido_marco,
+  B.Posicion_pedido_marco
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos2 A
+LEFT JOIN Compras_PedidoPrincipal B
+  ON (A.Documento_compras = B.KONNR_P
+    AND A.Posicion = B.KTPNR_P)
+ORDER BY Sociedad, Documento_compras;
+
+
+
+/* 
+   2.7 TABLA HISTORICO ORDENES DE COMPRA
+   
+   Tablas transaccionales
+        terpel-gtic-datalake.SAP_datarefinada.EKBE
+
+*/
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_Historico As
+WITH Historico1 As (
+  SELECT  
+    A.Documento_compras,		   -- EBELN,
+    A.Posicion,		   -- EBELP,
+    B.oKeySolPed,
+    Clase_de_operacion,		   -- VGABE,
+    Fe_contabilizacion,		   -- BUDAT,
+    Importe,		   -- WRBTR,
+    Moneda,		   -- WAERS,
+    Indicador_Debe_Haber,		   -- SHKZG,
+    Imputacion_actual,		   -- ZEKKN,
+    Ejerc_documento_mat_,		   -- GJAHR,
+    Documento_material,		   -- BELNR,
+    Posicion_doc_mat_,		   -- BUZEI,
+    Tipo_de_historial_de_pedido,		   -- BEWTP,
+    Clase_de_movimiento,		   -- BWART,
+    Clase_de_valoracion,		   -- BWTAR,
+    Creado_por,		   -- ERNAM,
+    Material		   -- MATNR
+  FROM `terpel-gtic-datalake.SAP_datarefinada.EKBE` A
+  INNER JOIN SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos B
+    ON ( A.Documento_compras = B. Documento_compras
+      AND A.Posicion = B.Posicion) )
+
+SELECT 
+  CONCAT(Documento_compras,'|', Posicion) As oHistorico,
+  oKeySolPed,
+  Documento_compras As Num_Doc_Compras_EKBE_tmp,
+  Posicion As Num_Doc_Compras_Pos_EKBE_tmp,
+  Clase_de_operacion As Historial_pedido_clase_Operacion,
+  DATE(Fe_contabilizacion) As Fecha_Contabilizacion_Documento_material,
+  IF(Indicador_Debe_Haber = 'H',Importe*-1, Importe ) * B.ConversionAmount As Importe_Mon_Doc_Material,
+  A.Moneda As Moneda_Doc_Material,
+  Indicador_Debe_Haber As Indicador_DH_Material,
+  Creado_por As Creador_historico,
+  Imputacion_actual As Numero_actual_imputacion,
+  Ejerc_documento_mat_ As Ejercicio_documento_material,
+  Documento_material As Numero_documento_material,
+  Posicion_doc_mat_ As Posicion_documento_material,
+  Tipo_de_historial_de_pedido,
+  Clase_de_movimiento As Clase_movimiento_GestionStocks,
+  Clase_de_valoracion,
+  REPLACE(LTRIM(REPLACE(Material, '0', ' ')), ' ', '0') As Material_historico
+FROM Historico1 A 
+LEFT JOIN MAP_FactorImporte B 
+  ON(A.Moneda = B.Moneda);
+
+
+-- Aqui concatenamos en Compras_Entregas lo que viene de Compras_Historico que cumple la condicion.
+INSERT INTO SAP_resultados_VP_Finanzas_Corporativas.Compras_Entregas
+SELECT   
+  oHistorico As oEntregas,
+  oKeySolPed,
+  '' As Numero_pedido_entregado,
+  -1 As Posicion_pedido_entregado,
+  Num_Doc_Compras_EKBE_tmp As Numero_pedido_principal,
+  Num_Doc_Compras_Pos_EKBE_tmp As Posicion_pedido_principal,
+  Fecha_Contabilizacion_Documento_material As Fecha_PedidoContrato_Entrega,
+  CONCAT(FORMAT_DATE('%b', Fecha_Contabilizacion_Documento_material),'_',
+      EXTRACT(YEAR FROM Fecha_Contabilizacion_Documento_material) ) As    AnioMes_entrega,
+  EXTRACT(YEAR FROM Fecha_Contabilizacion_Documento_material) As Anio_entrega,
+  EXTRACT(MONTH FROM Fecha_Contabilizacion_Documento_material) As Mes_entrega,
+  FORMAT_DATE('%b', Fecha_Contabilizacion_Documento_material) As Mes_entrega_nombre,
+  IFNULL(B.MAPOUT_TRM, 1) As TRM_pedido_entregado,
+  0 As Dias_fin_vigencia_entrega,
+  Importe_Mon_Doc_Material As Val_Unid_Pedido_entregado,
+  Importe_Mon_Doc_Material As Val_Neto_Pedido_entregado,
+  Material_Historico as Material_entrega,
+  'H' as Indicador_de_borrado_entrega, 
+  Clase_movimiento_GestionStocks as Clase_PedidoContrato_entrega, 
+  'Historico' as Origen,
+  Importe_Mon_Doc_Material * IFNULL(B.MAPOUT_TRM, 1) As Valor_Entrega_COP
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_Historico A
+LEFT JOIN MAP_TRM B
+  ON (CONCAT(A.Moneda_Doc_Material, UNIX_DATE(Fecha_Contabilizacion_Documento_material)) = B.MAPIN_TRM)
+WHERE Historial_pedido_clase_Operacion = '1';
+
+
+/*
+  ACTUALIZACION SOLPED
+  DATR 15/12/2021: pone 1 a la primera posicion_solped de los solped que tengan asociado un pedido 
+
+*/
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_SolPed As  
+WITH pedidosDistinct As (
+  SELECT DISTINCT 
+    oSolPed
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos` )
+
+SELECT 
+  A.*,
+  IF(B.oSolPed IS NOT NULL, 1, 0) As NumPed_Existe_
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_SolPed_temp A
+LEFT JOIN pedidosDistinct B
+  ON( A.Numero_SolPed = B.oSolPed)
+ORDER BY KeySolPed;
+
+
+/*
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_SolPed As  
+WITH pedidosDistinct As (
+  SELECT DISTINCT 
+    oSolPed
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos` ),
+
+  solpedTemp As (
+  SELECT 
+    A.*,
+    MIN(PosicionSolPed) OVER (PARTITION BY Numero_SolPed 
+                              ORDER BY Numero_SolPed , PosicionSolPed 
+                              ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) As _1era_PosSolped,
+    IF(B.oSolPed IS NOT NULL, 1, 0) As NumPed_SiNo
+  FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_SolPed_temp A
+  LEFT JOIN pedidosDistinct B
+    ON( A.Numero_SolPed = B.oSolPed)
+  ORDER BY KeySolPed )
+
+SELECT 
+  * EXCEPT (_1era_PosSolped, NumPed_SiNo),
+  --_1era_PosSolped,
+  --NumPed_SiNo,
+  IF(PosicionSolPed = _1era_PosSolped AND NumPed_SiNo = 1, 1, 0) As NumPed_Existe_
+FROM solpedTemp
+ORDER BY KeySolPed;
+*/
+
+
+
+/* 
+   2.8 TABLA MAESTRA DE PROVEEDORES
+   
+   Tablas maestras
+        terpel-gtic-datalake.SAP_resultados.Maestro_Mayoristas_Vendedores
+
+*/
+CREATE OR REPLACE TABLE  SAP_resultados_VP_Finanzas_Corporativas.Compras_Maestro_Proveedor AS
+SELECT DISTINCT
+  Acreedor As oProveedor,
+  num_Acreedor As CodProveedor,
+  Nombre As Nombre_Proveedor,
+  N__ident_fis_1 As NIT
+FROM  `terpel-gtic-datalake.SAP_resultados.Maestro_Mayoristas_Vendedores` A
+INNER JOIN SAP_resultados_VP_Finanzas_Corporativas.Compras_PedidosCabecera B
+  ON(A.Acreedor = B.Proveedor )
+ORDER BY CodProveedor; 
+
+
+
+
+/* 
+   2.9 TABLA MAESTRA DE CENTRO LOGISTICO
+   
+   Tablas maestras
+        terpel-gtic-datalake.SAP_resultados.Maestro_Centro_Logistico
+
+*/
+CREATE OR REPLACE TABLE  SAP_resultados_VP_Finanzas_Corporativas.Compras_Maestro_CentroLogistico AS
+SELECT DISTINCT
+  oCentroLogisticoKey As IdCentro,
+  Nombre_Centro_Logistico
+FROM terpel-gtic-datalake.SAP_resultados.Maestro_Centro_Logistico A
+INNER JOIN SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos B
+  ON(A.oCentroLogisticoKey = B.IdCentro )
+ORDER BY IdCentro; 
+
+
+/* 
+   2.10 TABLA MAESTRA DE SOCIEDAD
+   
+   Tablas maestras
+        terpel-gtic-datalake.SAP_resultados.Maestro_Sociedad
+
+*/
+CREATE OR REPLACE TABLE  terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Maestro_Sociedad AS
+SELECT DISTINCT
+  A.Sociedad,
+  Nombre_empresa As Sociedad_nombre
+FROM terpel-gtic-datalake.SAP_resultados.Maestro_Sociedad A
+INNER JOIN SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos B
+  ON(A.Sociedad = B.Sociedad )
+ORDER BY A.Sociedad; 
+
+
+
+--DROP TABLE IF EXISTS SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos2;
+--DROP TABLE IF EXISTS SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos_temp1;
+DROP TABLE IF EXISTS SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos_temp2;
+--DROP TABLE IF EXISTS SAP_resultados_VP_Finanzas_Corporativas.Compras_SolPed_temp;
+
+END
+
+
+
+/*
+
+-- VERIFICAR CIFRAS POR AÑO MES
+SELECT 
+  Anio_pedido,
+  Mes_pedido,
+  ROUND(SUM(Valor_Pedido_COP)) As Cifras
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos`
+GROUP BY Anio_pedido,
+  Mes_pedido
+ORDER BY Anio_pedido,
+  Mes_pedido
+
+--
+
+
+
+-- CREACION DE LA SABANA DE FACTURAS FALTANTES Y EXTRAS
+
+ PASO 1: Generar la sabana
+
+WITH sabanaTemp As (
+  SELECT DISTINCT 
+    Anio, 
+    Mes, 
+    Month, 
+    A.Numero_Pedido, 
+    --A.Posicion,
+    SUM(A.Valor_Pedido_COP) As Valor_Pedido_COP_Qlik,
+    SUM(B.Valor_Pedido_COP) As Valor_Pedido_COP_GCP,
+    B.Numero_Pedido As Numero_Pedido_GCP,
+    --B.Posicion As Posicion_GCP
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_CifrasQlik` A
+  LEFT JOIN `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos` B
+    ON (CAST(A.Numero_Pedido As STRING) = B.Numero_Pedido AND A.Posicion = B.Posicion)
+  GROUP BY Anio, Mes, Month, A.Numero_Pedido, B.Numero_Pedido
+  ORDER BY Anio, Month, Numero_Pedido--, Posicion
+  )
+
+ PASO 2: Separar por facturas extras y facturas faltantes
+  
+  -- 2.1 Faltantes
+  SELECT *
+  FROM sabanaTemp 
+  WHERE Numero_Pedido_GCP IS NULL 
+  ORDER BY Anio, Month, Numero_Pedido
+
+  -- 2.2 Extras
+  SELECT *
+  FROM sabanaTemp 
+  WHERE Numero_Pedido IS NULL 
+  ORDER BY Anio, Month, Numero_Pedido
+
+  -- 2.3 Coincidentes
+  --,WITH matched As (
+  SELECT *
+  FROM sabanaTemp 
+  WHERE Numero_Pedido IS NOT NULL AND Numero_Pedido_GCP IS NOT NULL 
+  ORDER BY Anio, Month, Numero_Pedido)
+  --)
+
+      2.3.1 Diferencias en coincidentes
+      SELECT Anio,Mes,Month,Numero_Pedido,Valor_Pedido_COP_Qlik,ROUND(Valor_Pedido_COP_GCP) As Valor_Pedido_COP_GCP,Numero_Pedido_GCP	 
+      FROM matched
+      WHERE ABS(Valor_Pedido_COP_Qlik - SAFE_CAST(ROUND(Valor_Pedido_COP_GCP,0) As INT64)) > 10 
+*/

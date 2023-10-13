@@ -1,0 +1,894 @@
+
+
+DECLARE vAnioRecarga INT64 DEFAULT 2021;  
+
+
+CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_DetalleFacturacionSAP As
+  WITH T102 As (
+    SELECT 
+      Mandante As codMandante, 
+      Sociedad As codSociedad,   
+      CAST(Ejercicio As STRING) As numEjercicio,  
+      CAST(Periodo_contable As STRING) As numPeriodoContable,
+      Fe_contabilizacion As fechaContabilizacion, 
+      N__documento As numDocContable, 
+      REPLACE(LTRIM(REPLACE(Material_MATNR,'0',' ')),' ','0') As codMaterialDien, 
+      Centro_de_beneficio As codCentroBeneficio, 
+      Indicador_impuestos As codIndicadorImpuesto, 
+      REPLACE(N__de_poblacion,'.0','') As codDaneMunicipio, 
+      N__ident_fis_1 As numIdFiscalReportar,
+      --CAST(AutoNumber.identif_Num As STRING) As numIdFiscalReportar_AutoN_Fact,
+      Factura As numPosFactura, 
+      Fecha_factura As fechaFactura,
+      REPLACE(LTRIM(REPLACE(Material_MATNR1,'0',' ')),' ','0') As codDienSistemaApoyo, 
+      Denominacion_ARKTX1 As nomDienSistemaApoyo,
+      CAST(4 As STRING) As codMedioPago,
+      NTAX As numTransacciones, 
+      Car_20 As NoIdMaquina,
+      'Vacio[SAP]' As numPrefijoFact,
+      Nombre_de_servidor_conversion As nomErp,
+      0 As vlrSistemaApoyo, 
+      Base_condicion_VALCC As vlrSegunCuentaContable, 
+      Base_condicion_VALST As vlrSobretasa, 
+      Base_condicion_VALDC As vlrDescuento 
+    FROM
+      `terpel-gtic-datalake.SAP_datarefinada.ZSDBIR_T102` 
+    WHERE Ejercicio = vAnioRecarga
+      AND Sociedad IN ('1000', '1900')),
+
+    AutoNumber As (
+    WITH temp1 As(
+      SELECT DISTINCT
+        numIdFiscalReportar As identif
+      FROM T102
+      ORDER BY identif)
+
+    SELECT 
+      identif,
+      ROW_NUMBER() OVER ( ) identif_Num
+    FROM temp1)
+
+  SELECT  
+    A.* EXCEPT (numIdFiscalReportar),
+    numIdFiscalReportar,
+    CAST(B.identif_Num As STRING) As numIdFiscalReportar_AutoN_Fact
+  FROM T102 A
+  LEFT JOIN AutoNumber B
+    ON A.numIdFiscalReportar = B.identif; 
+  
+  
+  
+  
+  
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_ConsolidadoFacturacionSAP As
+  WITH consolidado As(
+    SELECT 
+      Sociedad as codSociedad, 
+      CAST(Ejercicio As STRING) as numEjercicio, 
+      CAST(Periodo_contable As STRING) as numPeriodoContable, 
+      N__documento as numDocContable, 
+      Factura as numPosFactura, 
+      REPLACE(LTRIM(REPLACE(Material,'0',' ')),' ','0') as codMaterialDien, 
+      CONCAT(IFNULL(REPLACE(LTRIM(REPLACE(Material,'0',' ')),' ','0'), 'N-A'),'|',IFNULL(N__documento, 'N-A'),'|',IFNULL(Centro_de_beneficio, 'N-A'),'|',IFNULL(CAST(Ejercicio As STRING), 'N-A')) As IndicadorKeyTemp,
+      Centro_de_beneficio as codCentroBeneficio, 
+      Valor_neto_NETWR as vlrNeto, 
+      Base_condicion_VALBP as vlrBaseImpuesto, 
+      Base_condicion_VALIP as vlrImpuesto, 
+      Valor_neto_VALTF as vlrTotalFactura, 
+      Base_condicion_VALTR as vlrTotalReportar,
+      'ConsolidadoFact' As tipoTabla
+    FROM
+      `terpel-gtic-datalake.SAP_datarefinada.ZSDBIR_T103`
+    WHERE Ejercicio = vAnioRecarga
+      AND Sociedad IN ('1000', '1900')  )
+
+  SELECT  
+    A.*
+    EXCEPT(IndicadorKeyTemp),
+    B.codIndicadorImpuestoTotal As codIndicadorImpuesto
+  FROM consolidado A
+  LEFT JOIN SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_IndicadorPorDocumentoTotal B
+    USING (IndicadorKeyTemp);
+    
+    
+
+  /*
+      PASO 2.4 -> CREACIÓN DE LA TABLA FACT
+
+      Aqui se concatena la informacion de ConsolidadoFacturacion y de DetalleFacturacion.
+  
+  */
+  -- CREATING FACT TABLE: donde tengo información de Detalle y Consolidado.
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.Fact_FW As
+  WITH temp_consolidado As(
+  SELECT  
+    codSociedad,
+    numEjercicio,
+    numPeriodoContable,
+    numDocContable,
+    codMaterialDien,
+    codIndicadorImpuesto,
+    codCentroBeneficio,
+    numPosFactura,
+    SUM(vlrNeto) As vlrNeto,
+    SUM(vlrBaseImpuesto) As vlrBaseImpuesto,
+    SUM(vlrImpuesto) As vlrImpuesto,
+    SUM(vlrTotalFactura) As vlrTotalFactura,
+    SUM(vlrTotalReportar) As vlrTotalReportar
+  FROM SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_ConsolidadoFacturacionSAP
+  GROUP BY 
+      codSociedad,
+      numEjercicio,
+      numPeriodoContable,
+      numDocContable,
+      codMaterialDien,
+      codIndicadorImpuesto,
+      codCentroBeneficio,
+      numPosFactura	)
+
+  SELECT 
+    A.*
+    EXCEPT(codMandante),
+    B.vlrNeto,
+    B.vlrBaseImpuesto,
+    B.vlrImpuesto,
+    B.vlrTotalFactura,
+    B.vlrTotalReportar,
+    'DetalleFact' As tipoTabla
+  FROM SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_DetalleFacturacionSAP A
+  LEFT JOIN temp_consolidado B
+  USING(codSociedad,
+      numEjercicio,
+      numPeriodoContable,
+      numDocContable,
+      codMaterialDien,
+      codIndicadorImpuesto,
+      codCentroBeneficio,
+      numPosFactura);
+  
+  
+  
+  
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_TransaccionesTerceros As
+  WITH T100 As (
+    SELECT
+      CONCAT(IFNULL(Sociedad, 'N-A'),'|',IFNULL(N__ident_fis_1_STCD1, 'N-A'),'|',IFNULL(N__documento, 'N-A'),'|',IFNULL(Factura, 'N-A'),'|',IFNULL(CAST(Periodo_contable As STRING), 'N-A'),'|',IFNULL(CAST(Ejercicio As STRING), 'N-A'),'|',IFNULL(REPLACE(LTRIM(REPLACE(Material,'0',' ')),' ','0'), 'N-A'),'|', IFNULL(Cuenta_de_mayor_HKONT, 'N-A'),'|',IFNULL(Centro_de_beneficio, 'N-A')) As KeyGrupoCuentaVenta,
+      Sociedad As CodSociedad,
+      CAST(Ejercicio As STRING) As numEjercicio,
+      CAST(Periodo_contable As STRING) As numPeriodoContable,
+      Fe_contabilizacion As fechaContabilizacion,
+      N__documento As numDocContable,
+      REPLACE(LTRIM(REPLACE(Material,'0',' ')),' ','0') as codMaterialDien,
+      Centro_de_beneficio As codCentroBeneficio,
+      CAST(NULL As STRING) As codDaneMunicipio,
+      N__ident_fis_1_STCDR As numIdFiscalReportar,
+      Factura As numPosFactura,
+      CAST(NULL As STRING) As fechaFactura,
+      CAST(NULL As STRING) As codDienSistemaApoyo,
+      CAST(NULL As STRING) As nomDienSistemaApoyo,
+      CAST(NULL As STRING) As codMedioPago,
+      CAST(NULL As STRING) As numTransacciones,
+      CAST(NULL As STRING) As NoIdMaquina,
+      CAST(NULL As STRING) As numPrefijoFact,
+      'SAP' As nomErp,
+      0 As vlrSistemaApoyo,
+      CAST(0 As NUMERIC) As vlrSegunCuentaContable,
+      CAST(0 As NUMERIC) As vlrSobretasa,
+      CAST(0 As NUMERIC) As vlrDescuento,
+      CAST(0 As NUMERIC) As vlrNeto,
+      CAST(0 As NUMERIC) As vlrBaseImpuesto,
+      CAST(0 As NUMERIC) As vlrImpuesto,
+      CAST(0 As NUMERIC) As vlrTotalFactura,
+      CAST(0 As NUMERIC) As vlrTotalReportar,
+      'TransacTerc' As tipoTabla,
+      --DATE(CAST(Ejercicio As INT64), CAST(Periodo_contable As INT64),1) As fechaAnioPeriodo,
+      SAFE_CAST(CONCAT(Ejercicio,'-',Periodo_contable,'-',1) AS DATE) As fechaAnioPeriodo,
+      N__ident_fis_1_STCD1 As numIdDocumento,
+      Clase_de_documento As nomClaseDoc,
+      Fecha_de_documento As fechaDocumento,
+      CAST(Posicion__SD_ As STRING) As numPosicionDocContable,
+      Cuenta_de_mayor_HKONT As numCuentaMayor,
+      UPPER(Texto_breve_TXT20) As nomCuentaMayor,
+      Cuenta_de_mayor_SAKNR As numCuentaMayorReportar,
+      LEFT(Cuenta_de_mayor_SAKNR,1) As Nivel1CuentaMayor,
+      LEFT(Cuenta_de_mayor_SAKNR,2) As Nivel2CuentaMayor,
+      LEFT(Cuenta_de_mayor_SAKNR,4) As Nivel4CuentaMayor,
+      LEFT(Cuenta_de_mayor_SAKNR,6) As Nivel6CuentaMayor,
+      LEFT(Cuenta_de_mayor_SAKNR,8) As Nivel8CuentaMayor,
+      LEFT(Cuenta_de_mayor_SAKNR,10) As Nivel10CuentaMayor,
+      IF(CHAR_LENGTH(Cuenta_de_mayor_SAKNI)=1, IF(LEFT(Cuenta_de_mayor_HKONT,2)='14',Cuenta_de_mayor_HKONT, Cuenta_de_mayor_SAKNI) , Cuenta_de_mayor_SAKNI) As numCuentaInventario,
+      LEFT(IF(CHAR_LENGTH(Cuenta_de_mayor_SAKNI) = 1, IF(LEFT(Cuenta_de_mayor_HKONT,2)='14', Cuenta_de_mayor_HKONT, Cuenta_de_mayor_SAKNI), Cuenta_de_mayor_SAKNI), 4) as numCuentaInventario4,
+      Ledger As nomLedger,
+      Clave_contabiliz_ As numClaveContabilizacion,
+      UPPER(Nombre_NAME1) As nomRazonSocialNIF,
+      --REPLACE(N__ident_fis_1_STCDR,'.0', '') As numIdFiscalReportar,
+      Importe_ML_WRBTR As vlrImporteDoc,
+      Importe_ML_WRBRR As vlrImporteReportar,
+      Moneda As numClaveMoneda,
+      CONCAT(IFNULL(REPLACE(LTRIM(REPLACE(Material,'0',' ')),' ','0'), 'N-A'),'|',IFNULL(N__documento, 'N-A'),'|',IFNULL(Centro_de_beneficio, 'N-A'),'|',IFNULL(CAST(Ejercicio As STRING), 'N-A')) As IndicadorKeyTemp,
+      Documento_compras As numDocCompras_Pedido,
+      Doc_compensacion As numDocCompensacion,
+      Centro_de_coste As codCentroCosto,
+      UPPER(Denominacion_KTEXC) As nomCentroCosto,
+      UPPER(Responsable) As nomResponsableCentroCosto,
+      Nombre_del_usuario As nomUserSap,
+      UPPER(Nombre_1) As nomCentroLogistico,
+      Adm_Interno As nomInterventor,
+      Cl_documento_compras As nomTipoAdquisicion,
+      Texto,
+      Orden
+    FROM
+      `terpel-gtic-datalake.SAP_datarefinada.ZFIGLR_T100`
+    WHERE Ejercicio = vAnioRecarga
+      AND Sociedad IN ('1000', '1900')),
+
+    AutoNumber As(
+      WITH temp1 As(
+          SELECT DISTINCT 
+            numIdFiscalReportar As identif_STCDR
+          FROM T100
+          ORDER BY identif_STCDR
+      )
+      SELECT 
+      identif_STCDR,
+      ROW_NUMBER() OVER ( ) identif_STCDR_Num
+      FROM temp1)
+
+  SELECT 
+    A.* EXCEPT(numIdFiscalReportar),
+    numIdFiscalReportar,
+    CAST(B.identif_STCDR_Num As STRING) As numIdFiscalReportar_AutoN_Fact,
+    C.codIndicadorImpuestoTotal As codIndicadorImpuesto
+  FROM T100 A
+  --Autonumb
+  LEFT JOIN AutoNumber B
+  ON A.numIdFiscalReportar = B.identif_STCDR
+  --Indicador
+  LEFT JOIN SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_IndicadorPorDocumentoTotal C
+  ON A.IndicadorKeyTemp = C.IndicadorKeyTemp;
+
+
+  /*
+      PASO 2.6 -> CREACIÓN DE LA TABLA SALDOS MOVIMIENTOS
+
+      Aqui se extrae la información de Transacciones Terceros y se aplican las mismas reglas aplicadas en el calculo
+      de los saldos iniciales.
+
+  */
+  -- 2.6.1 Fase de acumulación
+  CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Temp_SaldosMov_FW` As
+  SELECT 
+    fechaAnioPeriodo,
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaInventario,
+    numCuentaMayorReportar,
+    numIdFiscalReportar,
+    numIdDocumento,
+    vlrImporteReportar,
+    vlrImporteDoc,
+    codSociedad,
+    numDocContable
+  FROM 
+    SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_TransaccionesTerceros
+  WHERE (
+      ((numCuentaInventario4 <> '1435') and (numCuentaInventario4 <> '1465') OR (numCuentaInventario4 IS NULL))or 
+      ((numCuentaInventario4 = '1435' or numCuentaInventario4 = '1465') and numCuentaMayorReportar = numCuentaInventario and vlrImporteReportar = vlrImporteDoc)
+    or ((numCuentaInventario4 = '1435' or numCuentaInventario4 = '1465') and numCuentaMayorReportar <> numCuentaInventario and vlrImporteReportar = vlrImporteDoc)
+        ); 
+
+  INSERT INTO `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Temp_SaldosMov_FW`
+  SELECT 
+    fechaAnioPeriodo,
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaInventario,
+    numCuentaMayorReportar,
+    numIdFiscalReportar,
+    numIdDocumento,
+    IF(vlrImporteReportar = vlrImporteDoc, vlrImporteReportar, vlrImporteReportar*-1) As vlrImporteReportar,
+    vlrImporteDoc,
+    codSociedad,
+    numDocContable
+  FROM 
+    SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_TransaccionesTerceros
+  WHERE 
+    (numCuentaInventario4 = '1435' or numCuentaInventario4 = '1465') and numCuentaMayorReportar = numCuentaInventario and vlrImporteReportar <> vlrImporteDoc;
+
+
+  INSERT INTO `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Temp_SaldosMov_FW`
+  SELECT 
+    fechaAnioPeriodo,
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaInventario,
+    numCuentaInventario As numCuentaMayorReportar,
+    numIdFiscalReportar,
+    numIdDocumento,
+    vlrImporteReportar*-1 As vlrImporteReportar,
+    vlrImporteDoc,
+    codSociedad,
+    numDocContable
+  FROM 
+    SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_TransaccionesTerceros
+  WHERE
+    (numCuentaInventario4 = '1435' or numCuentaInventario4 = '1465') and numCuentaMayorReportar <> numCuentaInventario and vlrImporteReportar = vlrImporteDoc;
+
+
+
+
+  -- 2.6.2 CREACION TABLA SaldosMovimientos_temp_FW a partir de los acumulados recien realizados. 
+  -- Autonumber III
+  CREATE OR REPLACE TEMP TABLE AutoNumber As
+  WITH temp1 As(
+      SELECT
+        DISTINCT(numIdFiscalReportar) idFiscalReport
+      FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Temp_SaldosMov_FW`
+      ORDER BY idFiscalReport
+  )
+  SELECT 
+    idFiscalReport,
+    ROW_NUMBER() OVER ( ) idFiscalReport_Num
+  FROM temp1;
+
+
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.SaldosMovimientos_temp_FW As
+  SELECT
+    fechaAnioPeriodo,
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaMayorReportar,
+    AutoNumber.idFiscalReport_Num As numIdFiscalReportar_AutoN_Fact,
+    numIdFiscalReportar,
+    IF(vlrImporteReportar<0, vlrImporteReportar, 0) As MovCredito,
+    IF(vlrImporteReportar>=0, vlrImporteReportar, 0) As MovDebito,
+    codSociedad,
+    numDocContable
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Temp_SaldosMov_FW` temp1
+  LEFT JOIN 
+    AutoNumber
+  ON temp1.numIdFiscalReportar = AutoNumber.idFiscalReport;
+
+
+  DROP TABLE IF EXISTS AutoNumber;
+
+
+  -- 2.6.3 CREACION TABLA SaldosMovimientos_FW a partir de la temporal recien creada. 
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.SaldosMovimientos_FW As
+  SELECT 
+    codSociedad, -- esta tabla tiene sociedad 1800
+    CAST(numEjercicio As STRING) numEjercicio,
+    CAST(numPeriodoContable As STRING) numPeriodoContable,
+    CAST(NULL As STRING) fechaContabilizacion,
+    numDocContable,
+    CAST(NULL As STRING) codMaterialDien,
+    CAST(NULL As STRING) codCentroBeneficio,
+    CAST(NULL As STRING) codDaneMunicipio,
+    CAST(NULL As STRING) numPosFactura,
+    CAST(NULL As STRING) As fechaFactura,
+    CAST(NULL As STRING) As codDienSistemaApoyo,
+    CAST(NULL As STRING) As nomDienSistemaApoyo,
+    CAST(NULL As STRING) As codMedioPago,
+    CAST(NULL As STRING) As numTransacciones,
+    CAST(NULL As STRING) As NoIdMaquina,
+    CAST(NULL As STRING) As numPrefijoFact,
+    CAST(NULL As STRING) As nomErp,
+    CAST(0 As INT64) vlrSistemaApoyo,
+    CAST(0 As NUMERIC) As vlrSegunCuentaContable,
+    CAST(0 As NUMERIC) As vlrSobretasa,
+    CAST(0 As NUMERIC) As vlrDescuento,
+    CAST(0 As NUMERIC) As vlrNeto,
+    CAST(0 As NUMERIC) As vlrBaseImpuesto,
+    CAST(0 As NUMERIC) As vlrImpuesto,
+    CAST(0 As NUMERIC) As vlrTotalFactura,
+    CAST(0 As NUMERIC) As vlrTotalReportar,
+    'balanceDoc' as tipoTabla,
+    fechaAnioPeriodo,
+    CAST(NULL As STRING) As numIdDocumento,
+    CAST(NULL As STRING) As nomClaseDoc,
+    CAST(NULL As STRING) As fechaDocumento,
+    CAST(NULL As STRING) As numPosicionDocContable,
+    CAST(NULL As STRING) As numCuentaMayor,
+    CAST(NULL As STRING) As nomCuentaMayor,
+    numCuentaMayorReportar,
+    LEFT(numCuentaMayorReportar, 1) as Nivel1CuentaMayor,
+    LEFT(numCuentaMayorReportar, 2) as Nivel2CuentaMayor,
+    LEFT(numCuentaMayorReportar, 4) as Nivel4CuentaMayor,
+    LEFT(numCuentaMayorReportar, 6) as Nivel6CuentaMayor,
+    LEFT(numCuentaMayorReportar, 8) as Nivel8CuentaMayor,
+    LEFT(numCuentaMayorReportar, 10) as Nivel10CuentaMayor,
+    CAST(NULL As STRING) As numCuentaInventario,
+    CAST(NULL As STRING) As numCuentaInventario4,
+    CAST(NULL As STRING) As nomLedger,
+    CAST(NULL As STRING) As numClaveContabilizacion,
+    CAST(NULL As STRING) As nomRazonSocialNIF,
+    CAST(0 As NUMERIC) As vlrImporteDoc,
+    CAST(0 As NUMERIC) As vlrImporteReportar,
+    CAST(NULL As STRING) As numClaveMoneda,
+    CAST(NULL As STRING) As numDocCompras_Pedido,
+    CAST(NULL As STRING) As numDocCompensacion,
+    CAST(NULL As STRING) As codCentroCosto,
+    CAST(NULL As STRING) As nomCentroCosto,
+    CAST(NULL As STRING) As nomResponsableCentroCosto,
+    CAST(NULL As STRING) As nomUserSap,
+    CAST(NULL As STRING) As nomCentroLogistico,
+    CAST(NULL As STRING) As nomInterventor,
+    CAST(NULL As STRING) As nomTipoAdquisicion,
+    CAST(NULL As STRING) As Texto,
+    CAST(NULL As STRING) As Orden,
+    numIdFiscalReportar,
+    CAST(numIdFiscalReportar_AutoN_Fact As STRING) numIdFiscalReportar_AutoN_Fact,
+    CAST(NULL As STRING) codIndicadorImpuesto,
+    CAST(0 As NUMERIC) as MovDebito, --Agregue esto
+    CAST(0 As NUMERIC) as MovCredito, --Agregue esto
+    SUM(MovDebito) as MovDebitoNivelDoc,
+    SUM(MovCredito) as MovCreditoNivelDoc
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.SaldosMovimientos_temp_FW`
+  GROUP BY 
+    codSociedad, 
+    numEjercicio, 
+    numPeriodoContable,
+    numDocContable, 
+    numIdFiscalReportar,
+    numIdFiscalReportar_AutoN_Fact,
+    fechaAnioPeriodo,  
+    numCuentaMayorReportar;
+
+
+
+
+  CREATE OR REPLACE TEMP TABLE nomRazonSocialNIF As
+  SELECT DISTINCT
+    numIdDocumento,
+    FIRST_VALUE(nomRazonSocialNIF IGNORE NULLS) 
+      OVER (PARTITION BY numIdDocumento 
+            ORDER BY numIdDocumento ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) As nomRazonSocialNIF
+  FROM
+    SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_TransaccionesTerceros
+  ORDER BY numIdDocumento;
+
+
+  CREATE OR REPLACE TEMP TABLE SM_SinDocumento_FW As
+    WITH temp1 As (
+      SELECT 
+        CONCAT(IFNULL(CAST(numEjercicio As STRING), 'N-A'),'|',IFNULL(CAST(numPeriodoContable As STRING), 'N-A'),'|',IFNULL(codSociedad, 'N-A'),'|',IFNULL(numCuentaMayorReportar, 'N-A'),'|',IFNULL(numIdFiscalReportar, 'N-A')) As KeySaldosBalance, 
+        fechaAnioPeriodo,
+        numEjercicio,
+        numPeriodoContable,
+        numCuentaMayorReportar,
+        numIdFiscalReportar,
+        numIdDocumento,
+        --ApplyMap('nomRazonSocialNIF', numIdDocumento, 'N-A') As  nomRazonSocialNIF, -- buscarV
+        codSociedad,
+        MovDebito,
+        MovCredito,
+        SaldoInicial,
+        'Balance' As tipoTabla
+      FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_SaldosMovimientos_SI`
+      WHERE numEjercicio = vAnioRecarga)
+
+  SELECT  
+    temp1.*,
+    B.nomRazonSocialNIF,
+  FROM temp1
+  LEFT JOIN nomRazonSocialNIF B
+  USING (numIdDocumento);    
+
+
+-- SaldosMovimientos_SinDocumento_FW Final
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.SaldosMovimientos_SinDocumento_FW As
+  SELECT  
+    KeySaldosBalance, 
+    codSociedad,  -- esta tabla tiene sociedad 1800
+    CAST(numEjercicio As STRING) numEjercicio,
+    CAST(numPeriodoContable As STRING) numPeriodoContable,
+    CAST(NULL As STRING) fechaContabilizacion,
+    CAST(NULL As STRING) numDocContable,
+    CAST(NULL As STRING) codMaterialDien,
+    CAST(NULL As STRING) codCentroBeneficio,
+    CAST(NULL As STRING) codDaneMunicipio,
+    CAST(NULL As STRING) numPosFactura,
+    CAST(NULL As STRING) As fechaFactura,
+    CAST(NULL As STRING) As codDienSistemaApoyo,
+    CAST(NULL As STRING) As nomDienSistemaApoyo,
+    CAST(NULL As STRING) As codMedioPago,
+    CAST(NULL As STRING) As numTransacciones,
+    CAST(NULL As STRING) As NoIdMaquina,
+    CAST(NULL As STRING) As numPrefijoFact,
+    CAST(NULL As STRING) As nomErp,
+    CAST(0 As INT64) vlrSistemaApoyo,
+    CAST(0 As NUMERIC) As vlrSegunCuentaContable,
+    CAST(0 As NUMERIC) As vlrSobretasa,
+    CAST(0 As NUMERIC) As vlrDescuento,
+    CAST(0 As NUMERIC) As vlrNeto,
+    CAST(0 As NUMERIC) As vlrBaseImpuesto,
+    CAST(0 As NUMERIC) As vlrImpuesto,
+    CAST(0 As NUMERIC) As vlrTotalFactura,
+    CAST(0 As NUMERIC) As vlrTotalReportar,
+    tipoTabla,
+    fechaAnioPeriodo,
+    numIdDocumento,
+    CAST(NULL As STRING) As nomClaseDoc,
+    CAST(NULL As STRING) As fechaDocumento,
+    CAST(NULL As STRING) As numPosicionDocContable,
+    CAST(NULL As STRING) As numCuentaMayor,
+    CAST(NULL As STRING) As nomCuentaMayor,
+    numCuentaMayorReportar,
+    LEFT(numCuentaMayorReportar, 1) as Nivel1CuentaMayor,
+    LEFT(numCuentaMayorReportar, 2) as Nivel2CuentaMayor,
+    LEFT(numCuentaMayorReportar, 4) as Nivel4CuentaMayor,
+    LEFT(numCuentaMayorReportar, 6) as Nivel6CuentaMayor,
+    LEFT(numCuentaMayorReportar, 8) as Nivel8CuentaMayor,
+    LEFT(numCuentaMayorReportar, 10) as Nivel10CuentaMayor,
+    CAST(NULL As STRING) As numCuentaInventario,
+    CAST(NULL As STRING) As numCuentaInventario4,
+    CAST(NULL As STRING) As nomLedger,
+    CAST(NULL As STRING) As numClaveContabilizacion,
+    nomRazonSocialNIF,
+    CAST(0 As NUMERIC) As vlrImporteDoc,
+    CAST(0 As NUMERIC) As vlrImporteReportar,
+    CAST(NULL As STRING) As numClaveMoneda,
+    CAST(NULL As STRING) As numDocCompras_Pedido,
+    CAST(NULL As STRING) As numDocCompensacion,
+    CAST(NULL As STRING) As codCentroCosto,
+    CAST(NULL As STRING) As nomCentroCosto,
+    CAST(NULL As STRING) As nomResponsableCentroCosto,
+    CAST(NULL As STRING) As nomUserSap,
+    CAST(NULL As STRING) As nomCentroLogistico,
+    CAST(NULL As STRING) As nomInterventor,
+    CAST(NULL As STRING) As nomTipoAdquisicion,
+    CAST(NULL As STRING) As Texto,
+    CAST(NULL As STRING) As Orden,
+    numIdFiscalReportar,
+    CAST(NULL As STRING) numIdFiscalReportar_AutoN_Fact,
+    CAST(NULL As STRING) codIndicadorImpuesto,
+    MovDebito,
+    MovCredito,
+    SaldoInicial
+  FROM SM_SinDocumento_FW
+  ORDER BY 
+    fechaAnioPeriodo;
+
+
+
+     -- 3.1 -> INSERT EN LA SABANA FACT LA TABLA TRANSAC TERCEROS
+ -- Concatenar a la Fact la tabla ReporteSalida_TransaccionesTerceros.
+  CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Fact2_FW` As
+  WITH FACT As(
+      SELECT * EXCEPT (codIndicadorImpuesto, numIdFiscalReportar, numIdFiscalReportar_AutoN_Fact ),
+        CAST(NULL As DATE) fechaAnioPeriodo,
+        CAST(NULL As STRING) numIdDocumento,
+        CAST(NULL As STRING) As nomClaseDoc,
+        CAST(NULL As STRING) As fechaDocumento,
+        CAST(NULL As STRING) As numPosicionDocContable,
+        CAST(NULL As STRING) As numCuentaMayor,
+        CAST(NULL As STRING) As nomCuentaMayor,
+        CAST(NULL As STRING) As numCuentaMayorReportar,
+        CAST(NULL As STRING) As Nivel1CuentaMayor,
+        CAST(NULL As STRING) As Nivel2CuentaMayor,
+        CAST(NULL As STRING) As Nivel4CuentaMayor,
+        CAST(NULL As STRING) As Nivel6CuentaMayor,
+        CAST(NULL As STRING) As Nivel8CuentaMayor,
+        CAST(NULL As STRING) As Nivel10CuentaMayor,
+        CAST(NULL As STRING) As numCuentaInventario,
+        CAST(NULL As STRING) As numCuentaInventario4,
+        CAST(NULL As STRING) As nomLedger,
+        CAST(NULL As STRING) As numClaveContabilizacion,
+        CAST(NULL As STRING) As nomRazonSocialNIF,
+        CAST(0 As NUMERIC) As vlrImporteDoc,
+        CAST(0 As NUMERIC) As vlrImporteReportar,
+        CAST(NULL As STRING) As numClaveMoneda,
+        CAST(NULL As STRING) As numDocCompras_Pedido,
+        CAST(NULL As STRING) As numDocCompensacion,
+        CAST(NULL As STRING) As codCentroCosto,
+        CAST(NULL As STRING) As nomCentroCosto,
+        CAST(NULL As STRING) As nomResponsableCentroCosto,
+        CAST(NULL As STRING) As nomUserSap,
+        CAST(NULL As STRING) As nomCentroLogistico,
+        CAST(NULL As STRING) As nomInterventor,
+        CAST(NULL As STRING) As nomTipoAdquisicion,
+        CAST(NULL As STRING) As Texto,
+        CAST(NULL As STRING) As Orden,
+        numIdFiscalReportar,
+        numIdFiscalReportar_AutoN_Fact,
+        codIndicadorImpuesto
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Fact_FW`)
+
+  SELECT 
+    *
+  FROM FACT
+
+  UNION ALL   
+
+  SELECT 
+    *
+    EXCEPT(KeyGrupoCuentaVenta,IndicadorKeyTemp)
+  FROM SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_TransaccionesTerceros
+  ORDER BY 
+      numEjercicio, numPeriodoContable;
+
+
+
+
+  -- PASO 3.2 - INSERT EN LA SABANA FACT LA TABLA SALDOS MOVIMIENTOS SIN DOCUMENTO
+  -- Concatenar a la Fact la tabla SaldosMovimientos_SinDocumentos_FW.
+  CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Fact3_FW` As
+  WITH sindoc_temp As(
+    SELECT 
+      *
+      EXCEPT (KeySaldosBalance)
+    FROM SAP_resultados_VP_Asuntos_Corp_Legal.SaldosMovimientos_SinDocumento_FW
+    )
+
+  SELECT 
+    A.*,
+    CAST(0 As NUMERIC) As MovDebito,
+    CAST(0 As NUMERIC) As MovCredito,
+    CAST(0 As NUMERIC) As SaldoInicial
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Fact2_FW` A
+
+  UNION ALL 
+
+  SELECT *
+
+  FROM sindoc_temp
+  ORDER BY 
+      numEjercicio, numPeriodoContable;
+
+
+
+  -- PASO 3.3 - INSERT EN LA SABANA FACT LA TABLA SALDOS MOVIMIENTOS
+  -- Concatenar a la Fact la tabla SaldosMovimientos_FW.
+  CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Fact4_FW` As
+  WITH saldmov_temp As(
+    SELECT 
+      *,
+      CAST(0 As NUMERIC) As SaldoInicial
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.SaldosMovimientos_FW`)
+
+  SELECT 
+    A.*
+    EXCEPT(SaldoInicial),
+    CAST(0 As NUMERIC) As MovDebitoNivelDoc,
+    CAST(0 As NUMERIC) As MovCreditoNivelDoc,
+    SaldoInicial
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Fact3_FW` A
+
+  UNION ALL 
+
+  SELECT *
+  FROM saldmov_temp
+  ORDER BY numEjercicio, numPeriodoContable;
+
+
+
+
+
+  -- PASO 3.4 - CREACION cuentasPUC MAP TABLE  
+  -- Crear las tablas dimensionales faltantes en la version final de la tabla Central.
+  CREATE OR REPLACE TEMP TABLE CuentasPUC As  
+  WITH Puc As(
+    SELECT DISTINCT
+      SPLIT(Texto, ' ')[OFFSET(0)] as numCuenta,
+      UPPER( REPLACE( Texto, SPLIT(Texto, ' ')[OFFSET(0)], '') ) as TextoCuenta
+    FROM `terpel-gtic-datalake.SAP_datarefinada.FAGL_011QT`
+    WHERE Estruct_balance_PyG = 'TPUC' 
+    AND Tipo_de_texto = 'K' 
+    AND Clave_de_idioma = 'S'
+    ORDER BY numCuenta)
+
+  SELECT DISTINCT
+    numCuenta,
+    FIRST_VALUE(TextoCuenta IGNORE NULLS) 
+      OVER (PARTITION BY numCuenta 
+            ORDER BY TextoCuenta ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) As TextoCuenta 
+  FROM Puc;
+
+
+  INSERT INTO  CuentasPUC
+  SELECT DISTINCT
+    CAST(CAST(Cuenta_de_mayor As INT64) As STRING) as numCuenta,
+    Texto_explicativo as TextoCuenta,
+  FROM `terpel-gtic-datalake.SAP_datarefinada.SKAT`
+  WHERE 
+    Plan_de_cuentas = 'PUCT' AND 
+    Clave_de_idioma = 'S';
+
+
+  INSERT INTO  CuentasPUC
+  SELECT DISTINCT
+    CAST(CAST(Cuenta_de_mayor As INT64) As STRING) as numCuenta,
+    Texto_explicativo as TextoCuenta,
+  FROM `terpel-gtic-datalake.SAP_datarefinada.SKAT`
+  WHERE 
+    Plan_de_cuentas = 'CACO' AND 
+    Clave_de_idioma = 'S';
+
+
+
+  -- PASO 3.5 - CREACION RANGOS FACTURACION MAP TABLE  
+  -- Crear las tablas dimensionales faltantes en la version final de la tabla Central.
+  CREATE OR REPLACE TEMP TABLE RangosFacturacion As  
+  SELECT DISTINCT
+    N_Rango As Rango,
+    Numero_Inicial_del_Rango As iniRango,
+    Numero_final_del_Rango As finRango,
+    UPPER(NEGOCIO) As nomRangoFactura
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Reporte_Salida_RangosFacturacion_Rangos`;
+
+
+  /* PASO 3.6 - CREACION VERSIÓN FINAL FACT JUNTO A CAMPOS DIMENSIONALES  
+  
+  Crear version final de la tabla Central con los campos dimensionales faltantes. 
+      
+          Tablas temporales:
+              Rangos_Factura
+              Indicadores */
+
+  -- Tabla temporal Rangos Factura
+  CREATE OR REPLACE TEMP TABLE Rangos_Factura As
+  WITH cross1 As(
+    SELECT 
+      A.numPosFactura,
+      C.iniRango,
+      C.finRango,
+      C.nomRangoFactura,
+      C.Rango
+    FROM SAP_resultados_VP_Asuntos_Corp_Legal.Fact4_FW A
+    CROSS JOIN RangosFacturacion C)
+
+  SELECT DISTINCT
+    *
+  FROM cross1
+  WHERE SAFE_CAST(numPosFactura As INT64) BETWEEN iniRango AND finRango;
+
+
+  -- Tabla temporal Indicadores
+  CREATE OR REPLACE TEMP TABLE Indicadores As
+  SELECT DISTINCT
+    Indicador_impuestos as codIndicadorImpuesto, 
+    Significado as nomIndicadorImpuesto
+  FROM
+    terpel-gtic-datalake.SAP_datarefinada.T007S
+  WHERE Esquema = 'TAXCO'
+  AND Clave_de_idioma = 'S'
+  ORDER BY codIndicadorImpuesto; 
+
+
+  /* TABLA QUE AGREGA LOS CAMPOS DE LAS TEMPORALES ANTERIORES EN LA SABANA PRINCIPAL
+  Para esta tabla fue necesario crear seis versiones distintas de la tabla PUC para poder traer los seis campos necesarios
+  
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.TMP_ReporteSalida_Fact As
+  WITH nomFact1 As(
+    SELECT 
+      *
+    FROM CuentasPUC
+    WHERE numCuenta LIKE '_'
+    ORDER BY numCuenta),
+
+    nomFact2 As(
+    SELECT 
+      *,
+    FROM CuentasPUC
+    WHERE numCuenta LIKE '__'
+    ORDER BY numCuenta),
+
+    nomFact4 As(
+    SELECT 
+      *,
+    FROM CuentasPUC 
+    WHERE numCuenta LIKE '____'
+    ORDER BY numCuenta),
+
+    nomFact6 As(
+    SELECT 
+      *,
+    FROM CuentasPUC 
+    WHERE numCuenta LIKE '______'
+    ORDER BY numCuenta),
+
+    nomFact8 As(
+    SELECT 
+      *,
+    FROM CuentasPUC 
+    WHERE numCuenta LIKE '________'
+    ORDER BY numCuenta),
+
+    nomFact10 As(
+    SELECT 
+      *,
+    FROM CuentasPUC
+    WHERE numCuenta LIKE '__________'
+    ORDER BY numCuenta)
+
+  SELECT
+    A.* EXCEPT (fechaAnioPeriodo, nomClaseDoc),
+    B.TextoCuenta As nombreCuentaNivel1,
+    C.TextoCuenta As nombreCuentaNivel2,
+    D.TextoCuenta As nombreCuentaNivel4,
+    E.TextoCuenta As nombreCuentaNivel6,
+    F.TextoCuenta As nombreCuentaNivel8,
+    G.TextoCuenta As nombreCuentaNivel10,
+    IFNULL(I.nomIndicadorImpuesto, 'N-A') As nomIndicadorImpuesto,
+    IFNULL(H.nomRangoFactura, 'N-A') As nomRangoFactura,
+    IFNULL(CAST(H.Rango As STRING), 'N-A') As rangoFactura,
+    CONCAT(IFNULL(codMaterialDien, 'N-A') , '|' , IFNULL(numDocContable, 'N-A'), '|', IFNULL(codCentroBeneficio, 'N-A')) As IndicadorKeyTemp,
+    --DATE(CAST(numEjercicio As INT64), CAST(numPeriodoContable As INT64),1) As fechaAnioPeriodo,
+    SAFE_CAST(CONCAT(numEjercicio,'-',numPeriodoContable,'-',1) AS DATE) As fechaAnioPeriodo,
+    numEjercicio As fechaAnio_,
+    A.nomClaseDoc,
+    J.Denominacion As Nombre_ClaseDoc
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Fact4_FW` A
+  LEFT JOIN nomFact1 B
+  ON(A.Nivel1CuentaMayor = B.numCuenta)
+  LEFT JOIN nomFact2 C
+  ON(A.Nivel2CuentaMayor = C.numCuenta)
+  LEFT JOIN nomFact4 D
+  ON(A.Nivel4CuentaMayor = D.numCuenta)
+  LEFT JOIN nomFact6 E
+  ON(A.Nivel6CuentaMayor = E.numCuenta)
+  LEFT JOIN nomFact8 F
+  ON(A.Nivel8CuentaMayor = F.numCuenta)
+  LEFT JOIN nomFact10 G
+  ON(A.Nivel10CuentaMayor = G.numCuenta)
+  LEFT JOIN Rangos_Factura H
+  ON A.numPosFactura = H.numPosFactura
+  LEFT JOIN Indicadores I
+  ON A.codIndicadorImpuesto = I.codIndicadorImpuesto
+  LEFT JOIN SAP_resultados.Maestro_ClaseDocumento J
+  ON A.nomClaseDoc = J.Clase_de_documento
+  ORDER BY fechaAnioPeriodo;
+
+
+
+
+  CREATE OR REPLACE TEMP TABLE ReporteSalida_Fact_Actual As  
+  SELECT
+    *,
+    CONCAT(FORMAT_DATE('%b', fechaAnioPeriodo),'_',numEjercicio) As MesAnio,
+    CONCAT(IFNULL(codSociedad, 'N-A'),'|',IFNULL(numIdDocumento, 'N-A'),'|',IFNULL(numDocContable, 'N-A'),'|',IFNULL(numPosFactura, 'N-A'),'|',IFNULL(CAST(numPeriodoContable As STRING), 'N-A'),'|',IFNULL(CAST(numEjercicio As STRING), 'N-A'),'|',IFNULL(REPLACE(LTRIM(REPLACE(codMaterialDien,'0',' ')),' ','0'), 'N-A'),'|', IFNULL(numCuentaMayor, 'N-A'),'|',IFNULL(codCentroBeneficio, 'N-A')) As KeyGrupoCuentaVenta,
+    CASE WHEN CAST(numCuentaMayor As INT64) BETWEEN 4100000000 AND 4199999999 THEN vlrImporteDoc ELSE 0 
+      END   As   Valor_Ingreso, 
+    CASE WHEN CAST(numCuentaMayor As INT64) BETWEEN 1355150101 AND 1355150108 THEN vlrImporteDoc ELSE 0  
+      END As   Valor_Autorretencion_Renta, 
+    CASE WHEN CAST(numCuentaMayor As INT64) BETWEEN 2408000000 AND 2408999999  THEN vlrImporteDoc ELSE 0
+      END as   Valor_Cuenta_IVA,
+    CASE WHEN CAST(numCuentaMayor As INT64) = 2495010003  THEN vlrImporteDoc ELSE 0
+      END as   Valor_Cuenta_Impuesto_al_Consumo,
+    SaldoInicial + MovCredito+MovDebito As SaldoFinal       
+  FROM SAP_resultados_VP_Asuntos_Corp_Legal.TMP_ReporteSalida_Fact 
+  WHERE codSociedad IN ('1000','1900')
+  ORDER BY fechaAnioPeriodo ;
+
+
+
+    CREATE OR REPLACE TEMP TABLE ReporteSalida_Fact_Historico As 
+    SELECT * 
+    FROM SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Fact 
+    --WHERE EXTRACT(YEAR FROM fechaAnioPeriodo) < vAnioRecarga;
+    WHERE EXTRACT(YEAR FROM fechaAnioPeriodo) < vAnioRecarga;
+
+
+  -- Insertamos la info del mes actual al historico
+    INSERT INTO  ReporteSalida_Fact_Historico (
+    SELECT * 
+    FROM ReporteSalida_Fact_Actual); 
+
+  -- Creamos la tabla final
+    CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Fact_pruebas As 
+    SELECT * 
+    FROM ReporteSalida_Fact_Historico
+    --WHERE codSociedad IN ('1000','1900')
+    ORDER BY fechaAnioPeriodo;
+
+
+/* 
+-- Generamos la vista
+ CREATE OR REPLACE VIEW SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Fact2021 As 
+    SELECT * 
+    FROM SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Fact 
+    WHERE  CAST(numEjercicio as INT64) = 2021; */
+

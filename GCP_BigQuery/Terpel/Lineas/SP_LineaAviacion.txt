@@ -1,0 +1,854 @@
+
+
+CREATE OR REPLACE PROCEDURE `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.SP_LineaAviacion`()
+BEGIN
+/*---------------- PROCEDIMIENTO ALMACENADO PARA OBTENCION DE PRESUPUESTOS Y FACTURAS Aviacion -------------------
+    Este proceso genera las tablas que contendrán los presupuestos y las facturas por año y mes para Linea Aviacion y 
+    algunas tablas dimensionales filtradas segun las condiciones del modelo. 
+
+    PASO 1 - DECLARACIÓN DE VARIABLES: En este paso se crean todas las variables y funciones necesarias para el proceso.
+    PASO 2 - FACTURAS Aviacion: Aplicar las reglas unicas de Aviacion a FacturasTotal.
+    PASO 3 - MODELO ASOCIATIVO Aviacion: Creación de las tablas necesarias para el modelo relacional final.
+
+*/
+
+
+  ------------------------------------- PASO 1 - DECLARACIÓN DE VARIABLES Y FUNCIONES ------------------------------------------
+  --- LAS FUNCIONES QUE SE REALIZABAN EN ESTA SECCION AHORA SE CREAN EN EL SP_Parametros
+  -- vCondicionalClaseFacturaAviacion
+  /*
+  CREATE OR REPLACE FUNCTION SAP_resultados_VP_Aviacion_Marinos.vCondicionalClaseFacturaAviacion(x STRING, y STRING) AS (
+    (x = 'S1' AND y <> 'ZGRA' --OR y IS NULL
+      )  
+     OR REGEXP_CONTAINS(x, '^(ZDCG|ZDCR|ZDEC|S2|ZFEC|ZFGC|ZFRE)$'));
+
+  -- vCondicionalClaseFacturaDocAnulaAviacion
+  CREATE OR REPLACE FUNCTION SAP_resultados_VP_Aviacion_Marinos.vCondicionalClaseFacturaDocAnulaAviacion(x STRING) AS (
+    --(x = 'S1' AND (x <> 'ZGRA' OR x IS NULL)) OR 
+    REGEXP_CONTAINS(x, '^(S1|ZDCG|ZDCR|ZDEC|S2|ZFEC|ZFGC|ZFRE)$')
+     --OR x IS NULL
+     );
+*/
+
+
+
+  --------------------------------------------- PASO 2 - FACTURAS Aviacion -----------------------------------------------------
+  --   From 2.5.Transform_Facturacion_Aviacion.
+  /*
+      PASO 3.1 -> CREACIÓN DE LA TABLA FACTURAS DE Aviacion 
+      La tabla de facturas Aviacion se genera a partir de un filtro dado por la tabla de productos y de reglas de negocios en
+      campos como Canal, Tipo_Factura.
+
+      Tablas transaccionales
+          terpel-gtic-datalake.SAP_resultados.FacturasTotal
+      Tablas maestras
+          terpel-gtic-datalake.SAP_resultados.Maestro_Productos
+
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.LA_Facturas As 
+  WITH ProductosLinea As(
+    SELECT DISTINCT   
+      oProductoKey
+    FROM `terpel-gtic-datalake.SAP_resultados.Maestro_Productos`
+    WHERE SAP_parametros.vCondicionalPRODUCTOAVIACION(oGrupo) -- oGrupo = 'M002'
+    ORDER BY oProductoKey),
+    
+    FacturasTotalTemp As (
+    SELECT *
+    FROM `terpel-gtic-datalake.SAP_resultados.FacturasTotal`
+    WHERE 
+      SAP_parametros.vCondicionalSOCIEDADAVIACION(Sociedad) --Sociedad = '1000' AND '1900'
+      AND SAP_parametros.vCondicionalCANALAVIACION(Canal) --Canal = 23
+      AND SAP_parametros.vCondicionalCLASEFACTURAAVIACION(Clase_Factura,Clasedocanulacion)
+      AND SAP_parametros.vCondicionalTIPOFACTURAAVIACION(Tipo_Factura,Clase_Factura)
+      AND SAP_parametros.vCondicionalFACTURACONTABILIZADAAVIACION(Statuscontabilidad)
+      /* Regla que generó confusion, basicamente traduce:
+         Si Clase_Factura IN ('S1','S2'), realiza al filtro de la funcion vCondicionalClaseFacturaDocAnulaAviacion,
+         Si Clase_Factura NOT IN ('S1','S2'), el filtro trae los nulos de ese campo */
+      AND IF(Clase_Factura IN('S1','S2'),
+           SAP_parametros.vCondicionalCLASEFACTURADOCANULACIONAVIACION(Clasedocanulacion),
+               --OR Clasedocanulacion IS NULL, --2022-01-25 ajuste sin exito, lleva aun mas info que no debería
+           Clasedocanulacion IS NULL OR CHAR_LENGTH(TRIM(Clasedocanulacion))=0))
+/*
+      Canal = '23' 
+      AND SAP_resultados_VP_Aviacion_Marinos.vCondicionalClaseFacturaAviacion(Clase_Factura, Clasedocanulacion)
+      AND (REGEXP_CONTAINS(Tipo_Factura, '(J|H)') OR Clase_Factura = 'ZFGC')
+      AND Statuscontabilidad = 'C'
+      AND IF(Clase_Factura IN('S1','S2'),
+             SAP_resultados_VP_Aviacion_Marinos.vCondicionalClaseFacturaDocAnulaAviacion(Clasedocanulacion), 
+               --OR Clasedocanulacion IS NULL, --2022-01-25 ajuste sin exito, lleva aun mas info que no debería
+             Clasedocanulacion IS NULL))
+*/
+  SELECT A.*
+  FROM FacturasTotalTemp A 
+  INNER JOIN ProductosLinea B
+    USING(oProductoKey)
+--WHERE A.Numero_Factura LIKE '71000788%'
+  ORDER BY Numero_Factura, Posicion; 
+
+
+
+
+  ----------------------------------- PASO 3 - MODELO ASOCIATIVO Aviacion ----------------------------------------------
+  --   From DM_Aviacion.
+  /*  
+      NOTA: Las maestras a continuacion se traen directamente de las maestras de SAP_resultados:
+          SAP_resultados:
+          Sociedad,
+          Canal
+          Centro Logistico,
+          Zona de Ventas,
+          Porcentajes
+
+      PASO 3.1 -> CREACIÓN DE LA TABLA FACTURACION DE Aviacion 
+      La tabla Facturacion contendrá la información de FacturasTotal transformadas para Aviacion y nuevos campos traidos de Basedestinatario
+      y de BasePadre, además de reglas adicionales.
+
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.LA_FacturacionA As
+  WITH FacturacionTemp As (
+    SELECT
+      ROW_NUMBER() OVER ( ) FacturacionKey,
+      Sociedad,
+      Sector,
+      Grupo_de_vendedores,
+      Canal_distribucion,
+      Centro,
+      Oficina_de_ventas,
+      REPLACE(LTRIM(REPLACE(Grupo_de_clientes_2, '0', ' ')), ' ', '0') Grupo_de_clientes_2,
+      oCalendarioKey, 
+      oSociedadKey,               
+      oZVKey,
+      'Aviación' AS oSegmentoKey,  
+      oSegmento1Key,
+      oSegmento3Key,
+      oSegmento4Key,  
+      CAST(oOficinaVentaKey As STRING) As oOficinaVentaKey,  
+      oCentroBeneficioKey, 
+      oCanalKey, 
+      oClienteKey,
+      oProductoKey, 
+      oDespachoKey, 
+      oSectorKey, 
+      oCentroLogisticoKey,
+      Importe_Impuesto,  
+      Valor_Vendido,   
+      Volumen_Vendido,       
+      Cantidad_Entrega,     
+      Volumen_Facturado,
+      Unidad_Medida_Venta,
+      Unidad_Medida_Base,
+      Numero_Factura,
+      Clase_Factura,
+      Tipo_Factura,
+      Posicion,	 
+      oDestinatarioKey,
+      oClienteKey AS oCliente,
+      oDestinatarioKey AS oDestinatario,
+      oClienteKey As oSegmento2Key  -- Inactivar cuando se Actualice SAP
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.LA_Facturas`), -- Aqui va LA_Facturas
+
+    BaseAviacionDestinatario As (
+    SELECT 
+      CAST(Destinatario As STRING) AS oDestinatarioKey, 
+      Nueva_Zona AS JefeZonaDestinatario,
+      SubSegmento AS SubSegmentoDestinatario 
+    FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Linea_Aviacion_BaseAviacion_BaseDestinatario`),
+
+    BaseAviacionCliente As (
+    SELECT 
+      CAST(Codigo_Padre As STRING) AS oClienteKey, 
+      Nueva_Zona AS JefeZonaCliente,
+      SubSegmento 
+    FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Linea_Aviacion_BaseAviacion_BaseCodigoPadre`)
+
+  SELECT 
+    A.*,
+    JefeZonaDestinatario,
+    B.SubSegmentoDestinatario,
+    JefeZonaCliente,
+    C.SubSegmento
+  FROM FacturacionTemp A 
+  LEFT JOIN BaseAviacionDestinatario B 
+  USING(oDestinatarioKey)
+  LEFT JOIN BaseAviacionCliente C 
+  USING(oClienteKey)
+  ORDER BY Numero_Factura;
+
+  -- Reglas adicionales para traer oZonaComercialKey y oSubSegmento
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Facturacion As
+  WITH Facturacion As (
+    SELECT 
+      *
+    FROM SAP_resultados_VP_Aviacion_Marinos.LA_FacturacionA),
+
+    FacturacionTemp As (
+    SELECT
+      FacturacionKey,
+      IF(JefeZonaDestinatario > 0, JefeZonaDestinatario, IF(JefeZonaCliente > 0, JefeZonaCliente, -1)) AS oZonaComercialKey,
+      IF(CHAR_LENGTH(SubSegmentoDestinatario) > 0, SubSegmentoDestinatario, SubSegmento) as oSubSegmento
+    FROM SAP_resultados_VP_Aviacion_Marinos.LA_FacturacionA)
+
+  SELECT
+    A.*,
+    CAST(B.oZonaComercialKey As STRING) As oZonaComercialKey, 
+    IFNULL(B.oSubSegmento, 'No Asignado') As oSubSegmento
+  FROM Facturacion A
+  LEFT JOIN FacturacionTemp B
+  USING(FacturacionKey);
+
+
+
+  /*
+      PASO 3.2 -> CREACIÓN DE LA TABLA PRESUPUESTOS AVIACION
+
+      Tablas transaccionales
+          Aviacion_PptoAviacion2014_Ppto
+          Aviacion_PptoAviacion2015_Ppto
+          Aviacion_PptoAviacion2016_Ppto
+          Aviacion_PptoAviacion2017_Ppto
+          Aviacion_PptoAviacion2019_Ppto
+          Aviacion_PptoAviacion2019_Ppto
+          Aviacion_PptoAviacion2020_Ppto
+          Aviacion_PptoAviacion2021_Ppto
+          Aviacion_PptoAviacion2022_Ppto
+
+  */
+  /*
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.LA_PresupuestoAll As
+  SELECT 
+    * EXCEPT(Destinatario_de_la_M, Codigo_Padre),
+    CAST(Destinatario_de_la_M As STRING) As Destinatario_de_la_M,
+    CAST(Codigo_Padre As STRING) As Codigo_Padre
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Linea_Aviacion_PptoAviacion2014_Ppto`
+  WHERE Mes IS NOT NULL;
+
+  INSERT INTO SAP_resultados_VP_Aviacion_Marinos.LA_PresupuestoAll
+  SELECT 
+    * EXCEPT(Destinatario_de_la_M, Codigo_Padre),
+    CAST(Destinatario_de_la_M As STRING) As Destinatario_de_la_M,
+    CAST(Codigo_Padre As STRING) As Codigo_Padre
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Linea_Aviacion_PptoAviacion2015_Ppto`
+  WHERE Mes IS NOT NULL;
+
+  INSERT INTO SAP_resultados_VP_Aviacion_Marinos.LA_PresupuestoAll
+  SELECT 
+    * EXCEPT(Destinatario_de_la_M, Codigo_Padre),
+    CAST(Destinatario_de_la_M As STRING) As Destinatario_de_la_M,
+    CAST(Codigo_Padre As STRING) As Codigo_Padre
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Linea_Aviacion_PptoAviacion2016_Ppto`
+  WHERE Mes IS NOT NULL;
+
+  INSERT INTO SAP_resultados_VP_Aviacion_Marinos.LA_PresupuestoAll
+  SELECT 
+    * EXCEPT(Destinatario_de_la_M, Codigo_Padre),
+    CAST(Destinatario_de_la_M As STRING) As Destinatario_de_la_M,
+    CAST(Codigo_Padre As STRING) As Codigo_Padre
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Linea_Aviacion_PptoAviacion2017_Ppto`
+  WHERE Mes IS NOT NULL;
+
+  INSERT INTO SAP_resultados_VP_Aviacion_Marinos.LA_PresupuestoAll
+  SELECT 
+    2018 As Ano,
+    * EXCEPT(Ano, Destinatario_de_la_M, Codigo_Padre),
+    CAST(Destinatario_de_la_M As STRING) As Destinatario_de_la_M,
+    CAST(Codigo_Padre As STRING) As Codigo_Padre
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Linea_Aviacion_PptoAviacion2018_Ppto`
+  WHERE Mes IS NOT NULL;
+
+  INSERT INTO SAP_resultados_VP_Aviacion_Marinos.LA_PresupuestoAll
+  SELECT 
+    * EXCEPT(Destinatario_de_la_M, Codigo_Padre),
+    CAST(Destinatario_de_la_M As STRING) As Destinatario_de_la_M,
+    CAST(Codigo_Padre As STRING) As Codigo_Padre
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Linea_Aviacion_PptoAviacion2019_Ppto`
+  WHERE Mes IS NOT NULL;
+
+  INSERT INTO SAP_resultados_VP_Aviacion_Marinos.LA_PresupuestoAll
+  SELECT 
+    * EXCEPT(Destinatario_de_la_M, Codigo_Padre),
+    CAST(Destinatario_de_la_M As STRING) As Destinatario_de_la_M,
+    CAST(Codigo_Padre As STRING) As Codigo_Padre
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Linea_Aviacion_PptoAviacion2020_Ppto`
+  WHERE Mes IS NOT NULL;
+
+  INSERT INTO SAP_resultados_VP_Aviacion_Marinos.LA_PresupuestoAll
+  SELECT 
+    * EXCEPT(Destinatario_de_la_M, Codigo_Padre),
+    CAST(Destinatario_de_la_M As STRING) As Destinatario_de_la_M,
+    CAST(Codigo_Padre As STRING) As Codigo_Padre
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Linea_Aviacion_PptoAviacion2021_Ppto`
+  WHERE Mes IS NOT NULL;
+
+  INSERT INTO SAP_resultados_VP_Aviacion_Marinos.LA_PresupuestoAll
+  SELECT 
+    * EXCEPT(Destinatario_de_la_M, Codigo_Padre),
+    CAST(Destinatario_de_la_M As STRING) As Destinatario_de_la_M,
+    CAST(Codigo_Padre As STRING) As Codigo_Padre
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Linea_Aviacion_PptoAviacion2022_Ppto`
+  WHERE Mes IS NOT NULL;
+
+*/
+  -- quitamos los nulos generados en la concatenacion
+  --CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.LA_PresupuestoAll As
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.PptoAviacion As
+  WITH pptoAll As (
+    SELECT
+      Ano,
+      Mes,
+      CASE
+            WHEN Mes IN ('ENE', 'Enero') THEN 1
+            WHEN Mes IN ('FEB', 'Febrero') THEN 2
+            WHEN Mes IN ('MAR', 'Marzo') THEN 3
+            WHEN Mes IN ('ABR', 'Abril') THEN 4
+            WHEN Mes IN ('MAY', 'Mayo') THEN 5
+            WHEN Mes IN ('JUN', 'Junio') THEN 6
+            WHEN Mes IN ('JUL', 'Julio') THEN 7
+            WHEN Mes IN ('AGO', 'Agosto') THEN 8
+            WHEN Mes IN ('SEP', 'Septiembre') THEN 9
+            WHEN Mes IN ('OCT', 'Octubre') THEN 10
+            WHEN Mes IN ('NOV', 'Noviembre') THEN 11
+            WHEN Mes IN ('DIC', 'Diciembre') THEN 12
+            ELSE 0
+        END AS  Month,
+      CeBe AS oCentroBeneficioKey,
+      Material AS oProductoKey,
+      --MonthYear AS oMonthYear,	 
+      --ROUND(CAST(REPLACE(Volumen,',','.') As NUMERIC),2) As PptoVolumenMes,	 
+      Volumen As PptoVolumenMes,	 
+      Canal_Distribucion AS oCanalKey,
+      Segmento AS oSegmentoKey, 
+      Nueva_zona AS oZonaComercialKey,   
+      ZV AS oZVKey, 
+      Destinatario_de_la_M AS oDestinatarioKey,
+      Codigo_Padre AS oClienteKey,
+      Nombre_1
+    --FROM SAP_resultados_VP_Aviacion_Marinos.LA_PresupuestoAll
+    FROM SAP_archivos_maestros_datarefinada.Linea_Aviacion_PptoAviacion
+    ORDER BY Ano, Mes)
+
+  SELECT
+    DATE(Ano, Month, 1) As oCalendarioKey,
+    * EXCEPT (PptoVolumenMes),
+    SUM(PptoVolumenMes) As PptoVolumenMes
+  FROM pptoAll
+  GROUP BY Ano,Mes,Month, oCentroBeneficioKey, oProductoKey, oCanalKey, oSegmentoKey, oZonaComercialKey, oZVKey, oDestinatarioKey, oClienteKey,Nombre_1
+  ORDER BY Ano,Mes,Month, oCentroBeneficioKey, oProductoKey, oCanalKey, oSegmentoKey, oZonaComercialKey, oZVKey, oDestinatarioKey, oClienteKey,Nombre_1 ;
+
+
+
+  /*
+      PASO 3.3 -> CREACIÓN DE LA TABLA TEMPORAL VOLUMEN PRESUPUESTO 
+      - Se crea una tabla temporal del presupuesto y dentro se crea un campo con el entero que representa cada mes.
+      - Se agregan los mismos campos que en el proceso de facturación hecho en el paso 3.2.
+      - Se aplican reglas adicionales
+
+  */
+
+  /* 3.3.1: TABLA PRESUPUESTO VOLUMEN TEMPORAL
+  */
+  CREATE OR REPLACE TEMP TABLE LA_TmpPptoVolumen As
+  WITH presupuestos As (
+    SELECT 
+      *
+    -- PresupuestoAll es con nulos, presupuesto sin ellos
+    FROM SAP_resultados_VP_Aviacion_Marinos.PptoAviacion
+    ORDER BY Ano, Mes),
+
+    BaseAviacionDestinatario As (
+    SELECT 
+      CAST(Destinatario As STRING) AS oDestinatarioKey, 
+      Nueva_Zona AS JefeZonaDestinatario,
+      SubSegmento AS SubSegmentoDestinatario 
+    FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Linea_Aviacion_BaseAviacion_BaseDestinatario`),
+
+    BaseAviacionCliente As (
+    SELECT 
+      CAST(Codigo_Padre As STRING) AS oClienteKey, 
+      Nueva_Zona AS JefeZonaCliente,
+      SubSegmento 
+    FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Linea_Aviacion_BaseAviacion_BaseCodigoPadre`)
+
+  SELECT 
+    A.*,
+    B.JefeZonaDestinatario,
+    B.SubSegmentoDestinatario,
+    C.JefeZonaCliente,
+    C.SubSegmento
+  FROM presupuestos A 
+  LEFT JOIN BaseAviacionDestinatario B 
+  USING(oDestinatarioKey)
+  LEFT JOIN BaseAviacionCliente C 
+  USING(oClienteKey)
+  ORDER BY Ano, Mes;
+
+
+
+  /* 3.3.2: TABLA PRESUPUESTO VOLUMEN
+            Reglas adicionales
+
+  */
+------------------------------------------- Calendario Aviacion --------------------------------------------
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_PptoVolumen As
+  -- CtrlPptoAviacion se usa mas adelante para añadir el Ppto diario a VolumenPpto
+  WITH CtrlPptoAviacion AS (
+    SELECT
+      Ano, 
+      ValFestivo, 
+      ValHabil
+    FROM `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.Tranversal_CtrlPpto_CtrlPptoAviacion`  ),
+
+  
+    calendarioAviacion AS (
+    SELECT
+      A.Fecha,
+      DATE_TRUNC(A.Fecha, MONTH) As Fecha_trunc,
+      A.year,
+      FORMAT_DATE("%b_%Y", A.Fecha) AS MonthYear,
+      A.Festivo,
+      A.EsFestivo,
+      IF(A.EsFestivo = 1 OR A.WeekNum = 1, B.ValFestivo, B.ValHabil )As vlrDiaPptoAviacion--,
+      --EXTRACT(DAY FROM LAST_DAY(A.Fecha, MONTH)) As NumDiasXMes
+    FROM `terpel-gtic-datalake.SAP_resultados.Calendario` A 
+    LEFT JOIN CtrlPptoAviacion B 
+      ON A.year= B.Ano ),
+    
+    NumDiasxMes AS (
+    SELECT DISTINCT 
+      Fecha_trunc,
+      ROUND(SUM(vlrDiaPptoAviacion),2) as NumDiasXMes
+    FROM calendarioAviacion
+    GROUP BY Fecha_trunc ),
+
+    lineaAviacion_Calendario As (
+    SELECT 
+      A.*, 
+      SAFE_DIVIDE(A.vlrDiaPptoAviacion, B.NumDiasXMes) AS PorPptoDiaAviacion
+    FROM calendarioAviacion A
+    LEFT JOIN NumDiasxMes B
+    USING (Fecha_trunc) ),
+
+    lineaAviacion_PptoVolumen As (
+    SELECT 
+      B.Fecha As FechaKey,
+      oCalendarioKey,
+      oCentroBeneficioKey, 
+      A.PptoVolumenMes, 
+      B.PorPptoDiaAviacion,
+      A.PptoVolumenMes * B.PorPptoDiaAviacion As PptoVolumen,
+      oProductoKey,
+      oCanalKey,
+      oSegmentoKey,
+      IF(JefeZonaDestinatario IS NOT NULL , JefeZonaDestinatario, IF(JefeZonaCliente IS NOT NULL,JefeZonaCliente, -1)) AS oZonaComercialKey,    
+      oZVKey,
+      IF(SubSegmentoDestinatario IS NOT NULL, 
+         SubSegmentoDestinatario, 
+         SubSegmento) As oSubSegmento,
+      UPPER(A.oClienteKey) as oClienteKey,	
+      oDestinatarioKey,
+      oClienteKey AS oSegmento2Key, -- Inactivar cuando se Actualice SAP
+      Nombre_1
+    FROM LA_TmpPptoVolumen A
+    LEFT JOIN lineaAviacion_Calendario B
+      ON (A.oCalendarioKey = B.Fecha_trunc)
+    WHERE B.Fecha IS NOT NULL)
+
+  SELECT 
+    ROW_NUMBER() OVER(ORDER BY oClienteKey, FechaKey ) As PptoVolumenKey,
+    FechaKey As oCalendarioKey,
+    oCalendarioKey As MonthYear,
+    * EXCEPT( oCalendarioKey, FechaKey, oDestinatarioKey, oSubSegmento, oZonaComercialKey ),
+    IF(oDestinatarioKey IS NULL AND UPPER(oSubSegmento) = 'CLIENTES NUEVOS',  
+       '_NoAsignado ClienteNuevos', 
+       UPPER(oDestinatarioKey)) As oDestinatarioKey,
+    IFNULL(oSubSegmento, '_NoAsignado') As oSubSegmento,
+    IFNULL(oZonaComercialKey, -1) As oZonaComercialKey
+  FROM lineaAviacion_PptoVolumen
+  ORDER BY PptoVolumenKey; 
+
+
+
+  /*
+      PASO 3.4 -> CREACIÓN DE LA TABLA MAESTRA PRODUCTOS DE AVICION 
+
+      Tablas maestras
+          terpel-gtic-datalake.SAP_resultados.Maestro_Productos
+          
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Maestro_Productos As
+  SELECT DISTINCT
+    oProductoKey,	
+    Codigo_Producto,
+    Producto,
+    IF(Jerarquia_Nivel2 = 'TURBINA','Jet A1', IF(Jerarquia_Nivel2 = 'MOTOR','Avgas', Jerarquia_Nivel2)) AS Grupo_Producto
+  FROM terpel-gtic-datalake.SAP_resultados.Maestro_Productos
+  WHERE oGrupo = 'M002'
+  ORDER BY oProductoKey; 
+
+
+
+  /*
+      PASO 3.5 -> CREACIÓN DE LA TABLA MAESTRA AEROPUERTOS PARA AVIACION 
+      
+      Tablas transaccionales
+          terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Facturacion 
+
+      Tablas maestras
+          terpel-gtic-datalake.SAP_resultados.Maestro_Centro_Beneficio
+
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Maestro_Aeropuertos As
+  WITH centro_beneficio As (
+    SELECT
+      oCentroBeneficioKey,	
+      Centro_de_beneficio,
+      Nombre_Centro_Beneficio As Aeropuerto
+    FROM SAP_resultados.Maestro_Centro_Beneficio
+    ORDER BY oCentroBeneficioKey),
+    
+    facturacionCentroBenef As (
+    SELECT DISTINCT 
+      oCentroBeneficioKey
+    FROM SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Facturacion  
+    )
+  SELECT 
+    A.*
+  FROM centro_beneficio A
+  INNER JOIN facturacionCentroBenef B
+  USING(oCentroBeneficioKey)
+  ORDER BY oCentroBeneficioKey;
+
+
+
+
+  /*
+      PASO 3.6 -> CREACIÓN DE LA TABLA MAESTRA ZONA COMERCIAL PARA Aviacion 
+      
+      Tablas transaccionales
+          terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Facturacion 
+
+      Tablas maestras
+          terpel-gtic-datalake.SAP_resultados.Maestro_ZonaComercial
+
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Maestro_ZonaComercial As
+  WITH zonaComercial As (
+    SELECT DISTINCT
+      oZonaComercialKey,
+      Ejecutivo_de_Cuenta,
+      Regional_Jefe_de_Zona,
+      Zona_Comercial
+    FROM SAP_resultados.Maestro_ZonaComercial
+    WHERE Linea = 'Aviación'
+    ORDER BY oZonaComercialKey),
+    
+    facturacionZonaComercial As (
+    SELECT DISTINCT 
+      oZonaComercialKey
+    FROM SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Facturacion)
+
+  SELECT 
+    A.*
+  FROM zonaComercial A
+  INNER JOIN facturacionZonaComercial B
+  USING(oZonaComercialKey)
+  ORDER BY oZonaComercialKey;
+
+
+
+  /*
+      PASO 3.7 -> CREACIÓN DE LA TABLA MAESTRA CLIENTES TRANSFORMADOS Y NUEVOS PARA AVIACION 
+      
+      Tablas transaccionales
+          terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_PptoVolumen 
+
+      Tablas maestras
+          terpel-gtic-datalake.SAP_resultados.Maestro_Cliente
+
+
+    3.7.1: Clientes Transformados
+          - Remover algunas tildes, renombres de Maestro_Cliente. 
+          - Cargar clientes unicamente pertenecientes en la facturacion de aviacion.
+          
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Maestro_Clientes As
+  WITH LineaAviacion_Maestro_Clientes As (
+    SELECT DISTINCT
+      oClienteKey,  
+      Razon_Social As Cliente,
+      Razon_Social AS Razon_Social_Cliente, 
+      Nombre_Comercial AS Nombre_Comercial_Cliente, 
+      CONCAT(oClienteKey, '-', Razon_Social) as Cliente_Completo,
+      UPPER(Ciudad) AS Ciudad_Cliente, 
+      IFNULL(UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(Departamento, 'Á', 'A'), 'É', 'E'), 'Í', 'I'), 'Ó', 'O'), 'Ú', 'U'), 'NARINO', 'NARIÑO')),'_No Asignado')  AS Nombre_Departamento,
+      IFNULL(Dias_Credito,'_NoAsignado') AS Dias_Credito_Cliente 
+    FROM SAP_resultados.Maestro_Cliente
+    --WHERE oClienteKey = '123160621'
+    ORDER BY oClienteKey),
+
+    Aviacion_Facturas_Clientes As (
+    SELECT DISTINCT 
+      oClienteKey
+    FROM SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Facturacion
+    ORDER BY oClienteKey
+    ),
+
+    Aviacion_Ppto_Clientes As (
+    SELECT DISTINCT 
+      oClienteKey
+    FROM SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_PptoVolumen
+    WHERE UPPER(Nombre_1) NOT LIKE '%CLIENTES NUEVOS%'
+    ORDER BY oClienteKey
+    ),
+    
+    Aviacion_Facturas_Ppto_Clientes AS (
+      SELECT DISTINCT 
+        oClienteKey
+      FROM Aviacion_Facturas_Clientes
+
+      UNION ALL
+
+      SELECT DISTINCT 
+        oClienteKey
+      FROM Aviacion_Ppto_Clientes ),
+
+    Aviacion_Clientes AS (
+      SELECT DISTINCT 
+        oClienteKey
+      FROM Aviacion_Facturas_Ppto_Clientes )
+
+  SELECT DISTINCT 
+    A.*
+  FROM LineaAviacion_Maestro_Clientes A
+  INNER JOIN Aviacion_Clientes B 
+  USING(oClienteKey);
+
+
+
+  /* 
+    3.7.3: Clientes Nuevos
+          Renombres, rellenar con nulos para poder concatenar de PptoVolumen a LineaAviacion_Maestro_Clientes.
+  */
+  INSERT INTO SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Maestro_Clientes
+  SELECT DISTINCT
+    oClienteKey, 
+    --CAST(NULL As STRING) AS Pais_Cliente, 
+    Nombre_1 As Cliente,
+    Nombre_1 AS Razon_Social_Cliente, 
+    Nombre_1 AS Nombre_Comercial_Cliente, 
+    CONCAT(oClienteKey, '-', Nombre_1) as Cliente_Completo,         
+    '_NoAsignado' AS Ciudad_Cliente, 
+    '_NoAsignado' AS Nombre_Departamento, 
+    '_NoAsignado' AS Dias_Credito_Cliente
+  FROM SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_PptoVolumen
+  WHERE UPPER(Nombre_1) LIKE '%CLIENTES NUEVOS%'
+  ORDER BY oClienteKey;
+
+
+
+  /*
+      PASO 3.8 -> CREACIÓN DE LA TABLA MAESTRA DESTINATARIOS PARA Aviacion 
+      
+      Tablas transaccionales
+          terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_PptoVolumen 
+
+      Tablas maestras
+          terpel-gtic-datalake.SAP_resultados.Maestro_Cliente
+
+  */
+  /* 
+    3.8.1: Destinatarios Transformados
+          renombres de Maestro_Cliente.
+  
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Maestro_Destinatarios As
+  WITH LineaAviacion_Maestro_Destinatarios As (
+    SELECT DISTINCT
+      oClienteKey As oDestinatarioKey, 
+      Razon_Social As Destinatario,
+      Razon_Social AS Razon_Social_Destinatario, 
+      Nombre_Comercial AS Nombre_Comercial_Destinatario,                   
+      UPPER(Ciudad) AS Ciudad_Destinatario,
+      IFNULL(Dias_Credito,'_NoAsignado') AS Dias_Credito_Destinatario   
+    FROM SAP_resultados.Maestro_Cliente
+    ORDER BY oClienteKey),
+
+    Aviacion_Facturas_Destinatarios As (
+    SELECT DISTINCT 
+      oDestinatarioKey
+    FROM SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Facturacion
+    ORDER BY oDestinatarioKey),
+
+    Aviacion_Ppto_Destinatarios As (
+    SELECT DISTINCT 
+      oDestinatarioKey
+    FROM SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_PptoVolumen
+    WHERE UPPER(Nombre_1) NOT LIKE '%CLIENTES NUEVOS%'
+    ORDER BY oDestinatarioKey
+    ),
+    
+    Aviacion_Facturas_Ppto_Destinatarios AS (
+      SELECT  DISTINCT 
+        oDestinatarioKey
+      FROM Aviacion_Facturas_Destinatarios
+      UNION ALL
+      SELECT  DISTINCT 
+        oDestinatarioKey
+      FROM Aviacion_Ppto_Destinatarios
+    ),
+    Aviacion_Destinatarios AS (
+      SELECT  DISTINCT 
+        oDestinatarioKey
+      FROM Aviacion_Facturas_Ppto_Destinatarios
+    )  
+
+  SELECT DISTINCT 
+    A.*
+  FROM LineaAviacion_Maestro_Destinatarios A
+  INNER JOIN Aviacion_Destinatarios B 
+  USING(oDestinatarioKey);
+
+
+
+  /* 
+    3.8.3: Destinatarios Nuevos
+          Renombres, rellenar con nulos para poder concatenar de PptoVolumen.
+  */
+  INSERT INTO SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Maestro_Destinatarios
+  SELECT DISTINCT
+    oClienteKey As oDestinatarioKey,  
+    '_NoAsignado' AS Destinatario, 
+    Nombre_1 AS Razon_Social_Destinatario, 
+    Nombre_1 AS Nombre_Comercial_Destinatario,                    
+    '_NoAsignado' AS Ciudad_Destinatario,
+    '_NoAsignado' AS Dias_Credito_Destinatario
+  FROM SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_PptoVolumen
+  WHERE UPPER(Nombre_1) LIKE '%CLIENTES NUEVOS%' -- solo funciona con % al final
+  ORDER BY oClienteKey;
+
+
+
+  /* 
+    4:     OPTIMIZACION
+          Eliminacion de tablas temporales.
+  */
+  DROP TABLE IF EXISTS SAP_resultados_VP_Aviacion_Marinos.LA_FacturacionA;
+  DROP TABLE IF EXISTS SAP_resultados_VP_Aviacion_Marinos.LA_Facturas;
+  DROP TABLE IF EXISTS SAP_resultados_VP_Aviacion_Marinos.LA_PresupuestoAll;
+  DROP TABLE IF EXISTS SAP_resultados_VP_Aviacion_Marinos.LA_TmpPptoVolumen;
+  DROP TABLE IF EXISTS SAP_resultados_VP_Aviacion_Marinos.PptoAviacion;
+
+
+END
+
+
+
+/* 
+ALGUNOS COMANDOS UTILES PARA PRUEBAS UNITARIAS
+
+
+---- Verificar cifras por mes y año
+-- PPTO
+  SELECT
+    EXTRACT(YEAR FROM oCalendarioKey) As Anio,
+    Month,
+    ROUND(SUM(PptoVolumenMes),0) As Ppto
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.PptoAviacion`
+  GROUP BY Anio, Month
+  ORDER BY Anio, Month;
+
+-- VOLUMEN
+  SELECT  
+    --EXTRACT(YEAR FROM oCalendarioKey) As Anio, 
+    --EXTRACT(MONTH FROM oCalendarioKey) As Mes,
+    --Numero_Factura,
+    oCalendarioKey,
+    SUM(Volumen_Vendido) As Volumen
+    --Volumen_Vendido
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Facturacion`
+  WHERE --EXTRACT(YEAR FROM oCalendarioKey) = 2021 AND EXTRACT(MONTH FROM oCalendarioKey) = 7
+    oCalendarioKey >= '2021-11-01'
+  GROUP BY --Anio, Mes, Numero_Factura
+    oCalendarioKey
+  ORDER BY --Anio, Mes, Numero_Factura;
+    oCalendarioKey;
+
+
+
+-- VERIFICAR TAMAÑOS DE CAMPOS TIPO BIGNUMERIC
+SELECT 
+  Volumen,
+  CHAR_LENGTH(CAST(Volumen AS STRING)) As Char_number
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Linea_Aviacion_PptoAviacion2014_Ppto` 
+ORDER BY Char_number desc;
+
+
+SELECT 
+  Volumen,
+  --PptoVolumenMes,
+  CHAR_LENGTH(CAST(Volumen AS STRING)) As Char_number
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.LI_PresupuestoAll` 
+ORDER BY Volumen desc;
+
+
+
+-- // COMPARACION DE LO QUE SE OBTIENE EN GCP VS QLIK
+WITH facturasAviacion_jul2021 As (
+  SELECT  
+    EXTRACT(YEAR FROM oCalendarioKey) As Anio, 
+    EXTRACT(MONTH FROM oCalendarioKey) As Mes,
+    Numero_Factura As Numero_Factura_GCP,
+    --oCalendarioKey,
+    ROUND(SUM(Volumen_Vendido)) As Volumen_GCP
+    --Volumen_Vendido
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Facturacion`
+  WHERE EXTRACT(YEAR FROM oCalendarioKey) = 2021 AND 
+    EXTRACT(MONTH FROM oCalendarioKey) = 7
+  GROUP BY Anio, Mes, Numero_Factura_GCP
+  ORDER BY Anio, Mes, Numero_Factura_GCP),
+
+  cifrasQlik_jul2021 As (
+    SELECT
+      A__o As Anio,
+      Mes,
+      CAST(Numero_Factura As STRING) As Numero_Factura_Qlik,
+      Volumen As Volumen_Qlik
+    FROM SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_CifrasQlik_Jul2021
+    ORDER BY Numero_Factura_Qlik )
+
+SELECT 
+  A.*,
+  B.Volumen_Qlik,
+  B.Numero_Factura_Qlik 
+FROM facturasAviacion_jul2021 A
+LEFT JOIN cifrasQlik_jul2021 B
+  ON(A.Numero_Factura_GCP = B.Numero_Factura_Qlik)
+WHERE A.Volumen_GCP <> B.Volumen_Qlik
+
+
+-- SEGUIMIENTO DE FACTURAS
+- LineaAviacion_Facturacion
+SELECT Sociedad,Grupo_de_vendedores, Oficina_de_ventas, Clase_Factura, Tipo_Factura, oProductoKey, Volumen_Vendido
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.LineaAviacion_Facturacion`
+WHERE Numero_Factura = '9403727780';
+
+
+- Facturas Total
+SELECT Grupo_de_vendedores, Oficina_de_ventas, Statuscontabilidad, Clase_Factura, Tipo_Factura, Clasedocanulacion, oProductoKey, Volumen_Vendido
+FROM `terpel-gtic-datalake.SAP_resultados.FacturasTotal` 
+WHERE Numero_Factura = '9403727780'
+
+
+- ZFACTFLUDES
+SELECT 
+  Factura_VBELN, Posicion, Fecha_factura, Grupo_de_vendedores, Oficina_de_ventas, Status_contabilidad, Clase_de_factura, 
+  REPLACE(LTRIM(REPLACE(Material, '0', ' ')), ' ', '0') Material, Cantidad_facturada
+FROM `terpel-gtic-datalake.SAP_datarefinada.ZFACTFLUDES_SD`
+WHERE Factura_VBELN = '9403727780'
+
+*/
+
+
+
+
+

@@ -1,0 +1,44 @@
+
+/*
+No olvide que este proceso arroja +2 en el calculo total de categorias: No nulos y nulos 
+*/
+
+-- OBTENEMOS EL CONTEO POR CATEGORIA DE LA VARIABLE
+WITH countsCat As(
+  SELECT DISTINCT 
+    --CAST(EXTRACT(YEAR FROM CAST(NECESIDAD As DATE)) As STRING) Category,
+    CAST(NECESIDAD As STRING) Category,
+    COUNT(CAST(NECESIDAD As STRING)) counts
+  FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_Map_Direccion
+  WHERE CAST(NECESIDAD As STRING) IS NOT NULL 
+  --AND CAST(NECESIDAD As STRING) LIKE 'DEL%'
+  --AND Ejercicio = 2016
+  GROUP BY Category)
+
+SELECT 
+  *
+FROM countsCat
+--WHERE Category LIKE '8%'
+WHERE counts >1
+
+-- CONCATENAMOS EL CONTEO TOTAL DE LAS CATEGORIAS ANTERIORES
+UNION ALL
+SELECT
+  'Totales no nulos' AS Category,
+  COUNT(CAST(NECESIDAD As STRING)) AS counts
+FROM
+  SAP_resultados_VP_Finanzas_Corporativas.Compras_Map_Direccion
+
+-- CONCATENAMOS LOS NULOS DE ESA VARIABLE
+UNION ALL
+SELECT
+  'Nulos' AS datos,
+  COUNT(*)- COUNT(CAST(NECESIDAD As STRING)) AS counts
+FROM
+  SAP_resultados_VP_Finanzas_Corporativas.Compras_Map_Direccion
+
+ORDER BY Category
+
+
+
+

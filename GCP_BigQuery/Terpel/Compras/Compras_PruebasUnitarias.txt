@@ -1,0 +1,293 @@
+-- Dia de hoy
+DECLARE vHoy DATE DEFAULT (SELECT CURRENT_DATE('UTC-5'));
+
+
+
+---
+SELECT  Numero_SolPed, PosicionSolPed
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_SolPed`
+WHERE Numero_SolPed = '0020161082'
+ORDER BY Numero_SolPed, PosicionSolPed;
+
+--
+SELECT  *
+FROM `terpel-gtic-datalake.SAP_datarefinada.EKKO`
+WHERE Documento_compras = '4800255520'
+ORDER BY Documento_compras;
+
+
+
+-- Permite validar Pedidos individuales
+SELECT DISTINCT
+  Sociedad, Documento_compras, Solicitud_de_pedido
+FROM `terpel-gtic-datalake.SAP_datarefinada.EKPO`
+WHERE Documento_compras = ''
+ORDER BY Documento_compras;
+
+--
+SELECT  *
+FROM `terpel-gtic-datalake.SAP_datarefinada.EKBE`
+WHERE Documento_compras = '4700000607'
+ORDER BY Documento_compras;
+
+
+
+--
+CREATE OR REPLACE TEMP TABLE Numero_Pedido_GCP As 
+SELECT  
+  Fecha_pedido, 
+  Numero_Pedido, 
+  Posicion, 
+  ROUND(Valor_Pedido_COP) As  Valor_Pedido_COP
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos`
+--WHERE Fecha_pedido BETWEEN '2021-07-01' AND '2021-07-31'
+ORDER BY Numero_Pedido, Posicion;
+
+SELECT *
+  --SUM(Valor_Pedido_COP) 
+FROM Numero_Pedido_GCP
+WHERE Numero_Pedido = '4600004461';
+
+
+-------------------------------------------------------------------------------------
+-- VALIDAR TRM A PARTIR DE LA FECHA 
+SELECT DISTINCT
+  CONCAT (Moneda_de_destino,UNIX_DATE(Valido_de)) As MAPIN_TRM,
+  Valido_de,
+  Tipo_de_cambio As MAPOUT_TRM
+FROM SAP_resultados.Maestro_TRM
+--WHERE UNIX_DATE(MAPIN_TRM) >0
+WHERE Valido_de = '2022-02-04'
+--WHERE EXTRACT(YEAR FROM Valido_de) >=2007
+ORDER BY Valido_de;
+
+
+
+-------------------------------------------------------------------------------------
+--CifrasQlik mas corto
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_CifrasQlik As 
+SELECT  
+  --Anio_Mes,
+  Fecha_de_pedido_contrato As Fecha_Pedido,
+  CAST(Numero_Pedido As STRING) As Numero_Pedido,
+  Posici__n_Pedido As Posicion_Pedido,
+  --CAST(REPLACE( Valor_Pedido_COP, '.','') As INT64) As Valor_Pedido_COP
+  CAST(ROUND(Valor_Pedido_COP) As INT64) As Valor_Pedido_COP,
+  Valor_Pedido_COP As Valor_Pedido_COP_Mes
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_CifrasQlik_temp` 
+--WHERE Fecha_Pedido <= '2022-05-18'
+ORDER BY Numero_Pedido;
+---
+SELECT * 
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_CifrasQlik`
+WHERE Numero_Pedido = '4600004461'
+ORDER BY Numero_Pedido;
+---------------------------------------------------------------------------------
+
+
+-- CREA COMPRAS_DIFERENCIAS
+CREATE OR REPLACE TABLE SAP_resultados_VP_Finanzas_Corporativas.Compras_Diferencias As 
+WITH compras_pedidos As (
+  SELECT Fecha_pedido,Numero_Pedido, Posicion,Valor_Pedido_COP
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos`
+  /* WHERE --(Fecha_pedido BETWEEN '2022-01-01' AND '2022-07-31')
+    Fecha_pedido >= '2022-01-01' */
+  ORDER BY Fecha_pedido,Numero_Pedido,Posicion
+),
+
+  diferencias As (
+  SELECT DISTINCT 
+    --Anio, 
+    --Mes, 
+    --Month, 
+    A.Fecha_pedido,
+    A.Numero_Pedido, 
+    A.Posicion_Pedido,
+    --SUM(A.Valor_Pedido_COP) As Valor_Pedido_COP_Qlik,
+    A.Valor_Pedido_COP As Valor_Pedido_COP_Qlik,
+    --ROUND(SUM(B.Valor_Pedido_COP)) As Valor_Pedido_COP_GCP,
+    ROUND(B.Valor_Pedido_COP,0) As Valor_Pedido_COP_GCP,
+    B.Numero_Pedido As Numero_Pedido_GCP,
+    B.Posicion As Posicion_GCP
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_CifrasQlik` A
+  LEFT JOIN compras_pedidos B
+    ON (CAST(A.Numero_Pedido As STRING) = B.Numero_Pedido AND CAST(A.Posicion_Pedido As STRING) = CAST(B.Posicion As STRING))
+  --WHERE A.Fecha_pedido BETWEEN '2022-01-01' AND '2022-07-31'
+  )
+
+SELECT *
+FROM diferencias
+WHERE  Valor_Pedido_COP_Qlik <> Valor_Pedido_COP_GCP OR  
+  Numero_Pedido IS NULL OR Numero_Pedido_GCP IS NULL OR
+  -- Para encontrar facturas que existan pero no posean el mismo numero de posiciones las dos lineas de abajo
+  (Numero_Pedido_GCP IS NOT NULL AND Posicion_GCP IS NULL) 
+    OR (Numero_Pedido IS NOT NULL AND Posicion_Pedido IS NULL)
+    --ABS(120700021-120700020)
+--GROUP BY Anio_pedido, Mes_pedido, Fecha_pedido, Numero_Pedido, Posicion_Pedido, Numero_Pedido_GCP, Posicion_GCP
+ORDER BY Fecha_pedido;
+--Numero_Pedido, Posicion_Pedido;
+
+
+-- EN CASO DE QUE HAYAN DIFERENCIAS DE DECIMALES
+SELECT *
+FROM SAP_resultados_VP_Finanzas_Corporativas.Compras_Diferencias
+WHERE  ABS(Valor_Pedido_COP_Qlik - Valor_Pedido_COP_GCP) BETWEEN 0 AND 2;
+
+
+
+-----------------------------------------------------------------------------------------------------------------------
+-------------------------------------- FUENTE DE DIFERENCIAS -------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------
+-- CASO I: FACTURAS CON DIFERENCIAS EN EL VALOR PEDIDO COP
+-----------------------------------------------------------------------------------------------------
+/*
+ I.2 CON ESTA TABLA VALIDAMOS LOS CAMPOS QUE GENERAN Valor_Pedido_COP = Val_Neto_Pedido * TRM_pedido
+ formula:
+   IF(B.Clase_PedidoContrato IN ('MK', 'WK'), Cantidad_prevista, Cantidad_de_pedido) * 
+      Precio_neto_pedido * IFNULL(G.ConversionAmount, 1) As    Val_Neto_Pedido,
+*/
+WITH generan_valor_neto_pedido_EKPO As (
+  SELECT 
+    A.Fecha_Pedido, A.Numero_Pedido,A.Posicion,A.Clase_PedidoContrato,A.Cantidad_prevista,
+    A.Cantidad_de_pedido,A.Precio_neto_pedido,A.ConversionAmount,A.Val_Neto_Pedido
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos` A
+/*   WHERE --Numero_Pedido = '4800243778'
+    --Numero_Pedido IN ('4800243778', '4600004211' , '4800246636')
+    Numero_Pedido IN (SELECT DISTINCT Numero_Pedido
+                      FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Diferencias`
+                      WHERE NOT ABS(Valor_Pedido_COP_Qlik - Valor_Pedido_COP_GCP) BETWEEN 0 AND 2 ) */
+  INNER JOIN `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Diferencias` B
+    ON (A.Numero_Pedido=B.Numero_Pedido 
+      AND  A.Posicion = B.Posicion_Pedido)
+  ORDER BY Numero_Pedido, Posicion ),
+
+--- donde TRM_pedido viene de:
+  TRM_EKKO As (
+  SELECT Sociedad,Fecha_pedido,Pedido, Moneda_pedido, TRM_pedido_cabecera, TRM_pedido 
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_PedidosCabecera` 
+  WHERE --Pedido = '4800243778'
+    Pedido IN (SELECT DISTINCT Numero_Pedido
+                      FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Diferencias`
+                      WHERE NOT ABS(Valor_Pedido_COP_Qlik - Valor_Pedido_COP_GCP) BETWEEN 0 AND 2 )
+  ORDER BY Pedido ),
+
+-- Y traemos el valor que viene de qlik
+  diferencias As (
+  SELECT Fecha_pedido,Numero_Pedido, Posicion_Pedido, Valor_Pedido_COP_Qlik
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Diferencias`
+  WHERE NOT ABS(Valor_Pedido_COP_Qlik - Valor_Pedido_COP_GCP) BETWEEN 0 AND 2  )
+
+SELECT
+  A.*,
+  B.Moneda_pedido,
+  B.TRM_pedido,
+  B.TRM_pedido * A.Val_Neto_Pedido As Valor_Pedido_COP_GCP,
+  C.Valor_Pedido_COP_Qlik,
+  C.Valor_Pedido_COP_Qlik - (B.TRM_pedido * A.Val_Neto_Pedido)  As Diferencias
+FROM generan_valor_neto_pedido_EKPO A
+LEFT JOIN TRM_EKKO B
+  ON(A.Numero_Pedido = B.Pedido)
+LEFT JOIN diferencias C
+  ON(A.Numero_Pedido = C.Numero_Pedido AND
+     A.Posicion = C.Posicion_Pedido)
+ORDER BY Fecha_Pedido,Numero_Pedido, Posicion;
+
+
+-----------------------------------------------------------------------------------------------------------------------
+-- CASO II: FACTURAS QUE NO ESTAN EN LA EKPO Ó EKKO
+SELECT DISTINCT Numero_Pedido 
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Diferencias`  A
+LEFT JOIN `terpel-gtic-datalake.SAP_datarefinada.EKPO` B 
+--LEFT JOIN `terpel-gtic-datalake.SAP_datarefinada.EKKO` B 
+  ON  CAST(A.Numero_Pedido AS STRING) = B.Documento_compras 
+WHERE B.Documento_compras IS NULL 
+ORDER BY Numero_Pedido;
+
+
+-- revision unitaria
+SELECT  Sociedad, Documento_compras, Posicion, Solicitud_de_pedido, Pos_solicitud_pedido
+FROM `terpel-gtic-datalake.SAP_datarefinada.EKKO`
+WHERE Documento_compras = '4800255520';
+
+SELECT Fecha_pedido,Numero_Pedido, Posicion,Valor_Pedido_COP
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos`
+WHERE Numero_Pedido = '4800260597'
+ORDER BY Fecha_pedido,Numero_Pedido,Posicion;
+-----------------------------------------------------------------------------------------------------------------------
+
+
+-- CASO III: SOLPED faltantes
+-- Si la tabla final NO contiene esa solped, falta esa solped en la EBAN
+WITH ekpo_solped As (
+  SELECT DISTINCT
+    B.Fecha_pedido,A.Documento_compras, A.Posicion,A.Solicitud_de_pedido As Solped_EKPO, A.Pos_solicitud_pedido As Pos_Solped_EKPO, B.Numero_Pedido_GCP
+    --A.oSolPed, A.Numero_Pedido
+  --FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos` A
+  FROM `terpel-gtic-datalake.SAP_datarefinada.EKPO` A  #debe ser la EKPO porque en la tabla cruda estan las solped que no pasan el filtro de la EBAN
+  --WHERE Documento_compras = '4800255520'
+  /* WHERE Documento_compras IN (SELECT DISTINCT Numero_Pedido
+                              FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Diferencias`
+                              WHERE Numero_Pedido_GCP IS NULL )  */
+  INNER JOIN `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Diferencias` B
+    ON (A.Documento_compras=B.Numero_Pedido 
+      AND  A.Posicion = B.Posicion_Pedido)
+  WHERE Numero_Pedido_GCP IS NULL
+  ORDER BY Documento_compras )
+
+SELECT 
+  A.*,
+  B.Solicitud_de_pedido	As Solped_EBAN,B.Pos_solicitud_pedido As Pos_Solped_EBAN, B.Clase_documento, B.Grupo_de_compras, B.Indicador_de_borrado
+FROM ekpo_solped A
+--WHERE Solicitud_de_pedido = ''
+/* WHERE Solicitud_de_pedido IN ( SELECT DISTINCT Solicitud_de_pedido
+                               FROM ekpo_solped  ) */
+LEFT JOIN `terpel-gtic-datalake.SAP_datarefinada.EBAN` B                               
+  ON( A.Solped_EKPO = B.Solicitud_de_pedido)
+WHERE Solicitud_de_pedido IS NULL
+ORDER BY Solped_EKPO, Pos_Solped_EKPO;
+
+------------------------------------------------------------------------------------------------------------
+
+/* GROUP BY MONTH */
+---------------------------------------------------------------------------------
+WITH compras_pedidos As (
+  SELECT DISTINCT
+    EXTRACT(YEAR FROM Fecha_pedido) As Anio, 
+    EXTRACT(MONTH FROM Fecha_pedido) As Mes, 
+    ROUND(SUM(Valor_Pedido_COP),2) As  Valor_Pedido_COP
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_Pedidos`
+  GROUP BY Anio,Mes
+  --WHERE Fecha_pedido BETWEEN '2021-07-01' AND '2021-07-31'
+  ORDER BY Anio,Mes
+),
+  
+  cifrasqlik As (
+    SELECT DISTINCT
+      EXTRACT(YEAR FROM Fecha_pedido) As Anio, 
+      EXTRACT(MONTH FROM Fecha_pedido) As Mes, 
+      ROUND(SUM(Valor_Pedido_COP_Mes),2) As  Valor_Pedido_COP
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Finanzas_Corporativas.Compras_CifrasQlik`
+    GROUP BY Anio,Mes
+    --WHERE Fecha_pedido BETWEEN '2021-07-01' AND '2021-07-31'
+    ORDER BY Anio,Mes
+  ),
+
+  diferencias As (
+  SELECT DISTINCT 
+    A.Anio,
+    A.Mes, 
+    A.Valor_Pedido_COP As Valor_Pedido_COP_Qlik,
+    B.Valor_Pedido_COP As Valor_Pedido_COP_GCP
+  FROM cifrasqlik A
+  LEFT JOIN compras_pedidos B
+    ON (A.Anio = B.Anio AND A.Mes = B.Mes )
+  --WHERE A.Fecha_pedido BETWEEN '2022-01-01' AND '2022-07-31'
+  )
+
+SELECT *,
+  ROUND(Valor_Pedido_COP_Qlik - Valor_Pedido_COP_GCP) As Diferencia
+FROM diferencias
+WHERE  Valor_Pedido_COP_Qlik <> Valor_Pedido_COP_GCP 
+  AND NOT ABS(Valor_Pedido_COP_Qlik - Valor_Pedido_COP_GCP) BETWEEN 0 AND 2
+ORDER BY Anio,Mes;
+

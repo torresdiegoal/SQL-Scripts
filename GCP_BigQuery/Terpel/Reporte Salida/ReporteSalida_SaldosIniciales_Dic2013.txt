@@ -1,0 +1,171 @@
+
+
+/*
+-------------------------- GENERACION DE LOS SALDOS INICIALES DE REPORTE SALIDA ----------------------------------------------
+-- Año 2013
+------------
+  
+    PASO 2.1.1 -> ASIGNAR VALOR A vMesActual: Mes actual siempre va a ser la variable que represente el mes de los 
+    movimientos actuales, por lo que será un mes adelante de la máxima fecha almacenada en SaldosIniciales.
+
+*/
+
+  CREATE OR REPLACE TEMP TABLE TransaccionesTerceros_SI As
+  SELECT
+    CONCAT(Ejercicio,'|',Periodo_contable,'|',Sociedad,'|',Cuenta_de_mayor_SAKNR,'|',REPLACE(N__ident_fis_1_STCDR,'.0', '')) As KeySaldosBalance,
+    Sociedad As CodSociedad,
+    Ejercicio As numEjercicio,
+    Periodo_contable As numPeriodoContable,
+    DATE(CAST(Ejercicio As INT64), CAST(Periodo_contable As INT64),1) As fechaAnioPeriodo,
+    Cuenta_de_mayor_SAKNR As numCuentaMayorReportar,
+    N__ident_fis_1_STCD1 As numIdDocumento,
+    UPPER(Nombre_NAME1) As nomRazonSocialNIF,
+    REPLACE(N__ident_fis_1_STCDR,'.0', '') As numIdFiscalReportar,
+    Importe_ML_WRBTR As vlrImporteDoc,
+    Importe_ML_WRBRR As vlrImporteReportar,
+    N__documento As numDocContable,
+    IF(CHAR_LENGTH(Cuenta_de_mayor_SAKNI)=1, IF(LEFT(Cuenta_de_mayor_HKONT,2)='14',Cuenta_de_mayor_HKONT, Cuenta_de_mayor_SAKNI) , Cuenta_de_mayor_SAKNI) As numCuentaInventario,
+    LEFT(IF(CHAR_LENGTH(Cuenta_de_mayor_SAKNI) = 1, IF(LEFT(Cuenta_de_mayor_HKONT,2)='14', Cuenta_de_mayor_HKONT, Cuenta_de_mayor_SAKNI), Cuenta_de_mayor_SAKNI), 4) as numCuentaInventario4
+  FROM
+    `terpel-gtic-datalake.SAP_datarefinada.ZFIGLR_T100`
+  WHERE Periodo_contable = 12 AND Ejercicio = 2013;
+
+SELECT * FROM  TransaccionesTerceros_SI;
+
+  /*-- PASO 2.2 -> CREACIÓN DE LA TABLA DE LOS MOVIMIENTOS DEL MES ACTUAL TOMANDO UNICAMENTE AQUELLOS REGISTROS
+  QUE CUMPLEN LAS CONDICIONES IMPUESTAS POR CADA UNO DE LOS TRES ESCENARIOS. ESTA TABLA INSERTA EN Temp_SaldosMov_SI 
+  en TRES OCASIONES,PARTIENDO SIEMPRE DE LA TABLA DE ARRIBA TransaccionesTerceros_SI 
+  */
+  -- Primera inserción
+  CREATE OR REPLACE TEMP TABLE Temp_SaldosMov_SI As
+  SELECT 
+    fechaAnioPeriodo,
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaInventario,
+    numCuentaMayorReportar,
+    numIdFiscalReportar,
+    numIdDocumento,
+    vlrImporteReportar,
+    vlrImporteDoc,
+    codSociedad,
+    numDocContable,
+    1 as Escenario
+  FROM 
+    TransaccionesTerceros_SI
+  WHERE (
+      ((numCuentaInventario4 <> '1435') and (numCuentaInventario4 <> '1465') OR (numCuentaInventario4 IS NULL))
+    or ((numCuentaInventario4 = '1435' or numCuentaInventario4 = '1465') and numCuentaMayorReportar = numCuentaInventario and vlrImporteReportar = vlrImporteDoc)
+    or ((numCuentaInventario4 = '1435' or numCuentaInventario4 = '1465') and numCuentaMayorReportar <> numCuentaInventario and vlrImporteReportar = vlrImporteDoc)
+        ); 
+
+  -- Segunda inserción
+  INSERT INTO Temp_SaldosMov_SI
+  SELECT 
+    fechaAnioPeriodo,
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaInventario,
+    numCuentaMayorReportar,
+    numIdFiscalReportar,
+    numIdDocumento,
+    IF(vlrImporteReportar = vlrImporteDoc, vlrImporteReportar, vlrImporteReportar*-1) As vlrImporteReportar,
+    vlrImporteDoc,
+    codSociedad,
+    numDocContable,
+    2 as Escenario
+  FROM 
+    TransaccionesTerceros_SI
+  WHERE 
+    (numCuentaInventario4 = '1435' or numCuentaInventario4 = '1465') and numCuentaMayorReportar = numCuentaInventario and vlrImporteReportar <> vlrImporteDoc;
+
+  -- Tercera inserción
+  INSERT INTO Temp_SaldosMov_SI
+  SELECT 
+    fechaAnioPeriodo,
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaInventario,
+    numCuentaInventario As numCuentaMayorReportar,
+    numIdFiscalReportar,
+    numIdDocumento,
+    vlrImporteReportar*-1 As vlrImporteReportar,
+    vlrImporteDoc,
+    codSociedad,
+    numDocContable,
+    3 as Escenario
+  FROM 
+    TransaccionesTerceros_SI
+  WHERE
+    (numCuentaInventario4 = '1435' or numCuentaInventario4 = '1465') and numCuentaMayorReportar <> numCuentaInventario and vlrImporteReportar = vlrImporteDoc;
+
+
+
+  /*-- PASO 2.3 -> CREACIÓN DE LA TABLA DE LOS MOVIMIENTOS SIN DOCUMENTO: a partir de los valores de la tabla anterior,
+  generamos dos campos que indicaran los MovCredito y MovDebito, los cuales son necesarios para generar el saldo inicial.
+  */
+  CREATE OR REPLACE TEMP TABLE SaldosMovimientos_SinDocumento_SI As
+  SELECT
+    fechaAnioPeriodo,
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaMayorReportar,
+    numIdFiscalReportar,
+    numIdDocumento,
+    codSociedad,
+    --numDocContable,
+    IF(vlrImporteReportar<0, vlrImporteReportar, 0) As MovCredito,
+    IF(vlrImporteReportar>=0, vlrImporteReportar, 0) As MovDebito,
+    CAST (0 As NUMERIC) As SaldoInicial
+  FROM Temp_SaldosMov_SI;
+ 
+
+
+  /*-- PASO 2.5 -> INSERCIÓN DE LA TABLA DE LOS MOVIMIENTOS SIN DOCUMENTO A LA EXISTENTE DE SALDOS INICIALES: 
+  insertamos los movimientos del mes anterior a la actual tabla de movimientos sin documento pero con fecha del mes 
+  actual.
+  */
+CREATE OR REPLACE TEMP TABLE SaldosIniciales_Prueba As
+  SELECT
+    fechaAnioPeriodo,
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaMayorReportar,
+    numIdFiscalReportar,
+    numIdDocumento,
+    codSociedad,
+    SUM(MovDebito) As MovDebito,
+    SUM(MovCredito) As MovCredito,
+    SUM(IF(REGEXP_CONTAINS(numCuentaMayorReportar, '^(5|6|7|41|42)') AND numPeriodoContable = 1, 0, SaldoInicial)) as SaldoInicial 
+    --SUM(IF(numCuentaMayorReportar LIKE ('5%', '6%', '7%', '41%', '42%') AND numPeriodoContable = 1, 0, SaldoInicial)) as SaldoInicial
+  FROM SaldosMovimientos_SinDocumento_SI
+  GROUP BY 
+    fechaAnioPeriodo, 
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaMayorReportar,
+    numIdFiscalReportar,codSociedad,
+    numIdDocumento
+ORDER BY 
+    fechaAnioPeriodo, 
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaMayorReportar,
+    numIdFiscalReportar,codSociedad,
+    numIdDocumento;
+
+
+/*-- PASO 2.6 -> Ingresar lo que se obtuvo en SaldosMovimiento_Prueba como nuevo SaldosMovimientos_SI.
+  */
+CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_SaldosIniciales_2013` As
+SELECT 
+  *
+FROM SaldosIniciales_Prueba
+ORDER BY fechaAnioPeriodo, 
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaMayorReportar,
+    numIdFiscalReportar,codSociedad,
+    numIdDocumento;
+
+

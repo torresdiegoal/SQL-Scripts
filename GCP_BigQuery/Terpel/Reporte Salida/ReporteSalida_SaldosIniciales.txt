@@ -1,0 +1,219 @@
+
+
+
+/*
+
+  SELECT 
+    fechaAnioPeriodo, 
+    SUM(MovCredito) as MovCredito,
+    SUM(MovDebito) as MovDebito    
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.Temp_SaldosMov_SI` 
+  --FROM terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_SaldosMovimientos_SI_BackUp
+  GROUP BY fechaAnioPeriodo
+  ORDER BY fechaAnioPeriodo;
+
+
+  Para 2021 marzo, las cifras para 1900 son:
+    7615 en t100
+    7557 en el primer filtro
+    58 en el segundo filtro
+    58 en el tercer filtro
+
+*/
+
+
+/*
+  Fecha que inicia en 'vAnioRecarga-01-01' pero que que con el tiempo va evolucionando hasta generar los saldos iniciales
+  hasta vMesEnd
+*/ 
+DECLARE vMesRecarga DATE DEFAULT '2021-03-01';
+
+-- Ultima Fecha a la que se tendrán saldos iniciales
+DECLARE vMesEnd DATE DEFAULT '2021-04-01';
+
+
+/* 
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_SaldosMovimientos_SI_prueba As
+  SELECT * 
+  FROM SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_SaldosMovimientos_SI
+  WHERE fechaAnioPeriodo < vMesRecarga
+  ORDER BY fechaAnioPeriodo, 
+    numEjercicio,
+    numPeriodoContable,
+    numCuentaMayorReportar,
+    numIdFiscalReportar,codSociedad,
+    numIdDocumento; */
+
+
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.TransaccionesTerceros_SI As
+    SELECT
+      CONCAT(Ejercicio,'|',Periodo_contable,'|',Sociedad,'|',Cuenta_de_mayor_SAKNR,'|',REPLACE(N__ident_fis_1_STCDR,'.0', '')) As KeySaldosBalance,
+      Sociedad As CodSociedad,
+      Ejercicio As numEjercicio,
+      Periodo_contable As numPeriodoContable,
+      DATE(CAST(Ejercicio As INT64), CAST(Periodo_contable As INT64),1) As fechaAnioPeriodo,
+      Cuenta_de_mayor_SAKNR As numCuentaMayorReportar,
+      N__ident_fis_1_STCD1 As numIdDocumento,
+      UPPER(Nombre_NAME1) As nomRazonSocialNIF,
+      REPLACE(N__ident_fis_1_STCDR,'.0', '') As numIdFiscalReportar,
+      Importe_ML_WRBTR As vlrImporteDoc,
+      Importe_ML_WRBRR As vlrImporteReportar,
+      N__documento As numDocContable,
+      IF(CHAR_LENGTH(Cuenta_de_mayor_SAKNI)=1, IF(LEFT(Cuenta_de_mayor_HKONT,2)='14',Cuenta_de_mayor_HKONT, Cuenta_de_mayor_SAKNI) , Cuenta_de_mayor_SAKNI) As numCuentaInventario,
+      LEFT(IF(CHAR_LENGTH(Cuenta_de_mayor_SAKNI) = 1, IF(LEFT(Cuenta_de_mayor_HKONT,2)='14', Cuenta_de_mayor_HKONT, Cuenta_de_mayor_SAKNI), Cuenta_de_mayor_SAKNI), 4) as numCuentaInventario4
+    FROM
+      `terpel-gtic-datalake.SAP_datarefinada.ZFIGLR_T100`
+    WHERE Periodo_contable = EXTRACT (MONTH FROM vMesRecarga) 
+      AND Ejercicio = EXTRACT (YEAR FROM vMesRecarga)
+      --AND Sociedad IN ('1000', '1900');
+      AND Sociedad IN ('1900');
+
+
+
+    /*-- PASO 1.3.2 -> CREACIÓN DE LA TABLA DE LOS MOVIMIENTOS DEL MES ACTUAL TOMANDO UNICAMENTE AQUELLOS REGISTROS
+    QUE CUMPLEN LAS CONDICIONES IMPUESTAS POR CADA UNO DE LOS TRES ESCENARIOS. ESTA TABLA INSERTA EN Temp_SaldosMov_SI 
+    en TRES OCASIONES,PARTIENDO SIEMPRE DE LA TABLA DE ARRIBA TransaccionesTerceros_SI 
+    */
+    -- Primera inserción
+    --CREATE OR REPLACE TEMP TABLE Temp_SaldosMov_SI As
+    CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.Temp_SaldosMov_SI As
+    SELECT 
+      fechaAnioPeriodo,
+      numEjercicio,
+      numPeriodoContable,
+      numCuentaInventario,
+      numCuentaMayorReportar,
+      numIdFiscalReportar,
+      numIdDocumento,
+      vlrImporteReportar,
+      vlrImporteDoc,
+      codSociedad,
+      numDocContable,
+      1 as Escenario
+    FROM 
+      SAP_resultados_VP_Asuntos_Corp_Legal.TransaccionesTerceros_SI
+    WHERE (
+        ((numCuentaInventario4 <> '1435') AND (numCuentaInventario4 <> '1465') OR (numCuentaInventario4 IS NULL))
+      OR ((numCuentaInventario4 = '1435' OR numCuentaInventario4 = '1465') AND numCuentaMayorReportar = numCuentaInventario AND vlrImporteReportar = vlrImporteDoc)
+      OR ((numCuentaInventario4 = '1435' OR numCuentaInventario4 = '1465') AND numCuentaMayorReportar <> numCuentaInventario AND vlrImporteReportar = vlrImporteDoc)
+          ); 
+
+    -- Segunda inserción
+    --INSERT INTO Temp_SaldosMov_SI
+    INSERT INTO SAP_resultados_VP_Asuntos_Corp_Legal.Temp_SaldosMov_SI 
+    SELECT 
+      fechaAnioPeriodo,
+      numEjercicio,
+      numPeriodoContable,
+      numCuentaInventario,
+      numCuentaMayorReportar,
+      numIdFiscalReportar,
+      numIdDocumento,
+      IF(vlrImporteReportar = vlrImporteDoc, vlrImporteReportar, vlrImporteReportar*-1) As vlrImporteReportar,
+      vlrImporteDoc,
+      codSociedad,
+      numDocContable,
+      2 as Escenario
+    FROM 
+      SAP_resultados_VP_Asuntos_Corp_Legal.TransaccionesTerceros_SI
+    WHERE 
+      (numCuentaInventario4 = '1435' OR numCuentaInventario4 = '1465') AND numCuentaMayorReportar = numCuentaInventario AND vlrImporteReportar <> vlrImporteDoc;
+
+    -- Tercera inserción
+    --INSERT INTO Temp_SaldosMov_SI
+    INSERT INTO SAP_resultados_VP_Asuntos_Corp_Legal.Temp_SaldosMov_SI 
+    SELECT 
+      fechaAnioPeriodo,
+      numEjercicio,
+      numPeriodoContable,
+      numCuentaInventario,
+      numCuentaInventario As numCuentaMayorReportar,
+      numIdFiscalReportar,
+      numIdDocumento,
+      vlrImporteReportar*-1 As vlrImporteReportar,
+      vlrImporteDoc,
+      codSociedad,
+      numDocContable,
+      3 as Escenario
+    FROM 
+      SAP_resultados_VP_Asuntos_Corp_Legal.TransaccionesTerceros_SI
+    WHERE
+      (numCuentaInventario4 = '1435' OR numCuentaInventario4 = '1465') AND numCuentaMayorReportar <> numCuentaInventario AND vlrImporteReportar = vlrImporteDoc;
+
+
+/*
+  PASO 1.3.3 -> CREACIÓN DE LA TABLA DE LOS MOVIMIENTOS SIN DOCUMENTO: a partir de los valores de la tabla anterior,
+  generamos dos campos que indicaran los MovCredito y MovDebito, los cuales son necesarios para generar el saldo inicial.
+*/
+    --CREATE OR REPLACE TEMP TABLE SaldosMovimientos_SinDocumento_SI As
+    CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.Temp_SaldosMov_SI As
+    SELECT
+      fechaAnioPeriodo,
+      numEjercicio,
+      numPeriodoContable,
+      numCuentaMayorReportar,
+      numIdFiscalReportar,
+      numIdDocumento,
+      codSociedad,
+      --numDocContable, -- Lo agrego o no? 2022-01-22
+      IF(vlrImporteReportar<0, vlrImporteReportar, 0) As MovCredito,
+      IF(vlrImporteReportar>=0, vlrImporteReportar, 0) As MovDebito,
+      CAST (0 As NUMERIC) As SaldoInicial
+    FROM SAP_resultados_VP_Asuntos_Corp_Legal.Temp_SaldosMov_SI;
+  
+
+
+/*
+  PASO 1.3.4 -> INSERCIÓN DE LA TABLA SALDOSMOVIMIENTOS A LA DE LOS MOVIMIENTOS SIN DOCUMENTO: insertamos los
+  movimientos del mes anterior a la actual tabla de movimientos sin documento pero con fecha del mes actual.
+*/
+    INSERT SaldosMovimientos_SinDocumento_SI
+    SELECT 
+      DATE (EXTRACT( YEAR FROM vMesRecarga), EXTRACT( MONTH FROM vMesRecarga), 1) As fechaAnioPeriodo,
+      EXTRACT( YEAR FROM vMesRecarga) As numEjercicio,
+      EXTRACT( MONTH FROM vMesRecarga) As numPeriodoContable,
+      numCuentaMayorReportar,
+      numIdFiscalReportar,
+      numIdDocumento,
+      codSociedad,
+      CAST (0 As NUMERIC) as MovDebito,
+      CAST (0 As NUMERIC) as MovCredito,
+      SaldoInicial + MovDebito + MovCredito As SaldoInicial -- SP Agregue esto
+    FROM SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_SaldosMovimientos_SI
+    WHERE fechaAnioPeriodo = DATE_TRUNC(vMesRecarga -1,MONTH);
+
+
+  /*-- PASO 1.3.5 -> INSERCIÓN DE LA TABLA DE LOS MOVIMIENTOS SIN DOCUMENTO A LA EXISTENTE DE SALDOS INICIALES: 
+    insertamos los movimientos del mes anterior a la actual tabla de movimientos sin documento pero con fecha del mes 
+    actual.
+  */
+    INSERT SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_SaldosMovimientos_SI_prueba
+    SELECT
+      fechaAnioPeriodo,
+      numEjercicio,
+      numPeriodoContable,
+      numCuentaMayorReportar,
+      numIdFiscalReportar,
+      numIdDocumento,
+      codSociedad,
+      SUM(MovDebito) As MovDebito,
+      SUM(MovCredito) As MovCredito,
+      SUM(IF(REGEXP_CONTAINS(numCuentaMayorReportar, '^(5|6|7|41|42)') AND numPeriodoContable = 1, 0, SaldoInicial)) as SaldoInicial 
+      --SUM(IF(numCuentaMayorReportar LIKE ('5%', '6%', '7%', '41%', '42%') AND numPeriodoContable = 1, 0, SaldoInicial)) as SaldoInicial
+    FROM SaldosMovimientos_SinDocumento_SI
+    GROUP BY 
+      fechaAnioPeriodo, 
+      numEjercicio,
+      numPeriodoContable,
+      numCuentaMayorReportar,
+      numIdFiscalReportar,
+      codSociedad,
+      numIdDocumento
+    ORDER BY 
+      fechaAnioPeriodo, 
+      numEjercicio,
+      numPeriodoContable,
+      numCuentaMayorReportar,
+      numIdFiscalReportar,
+      codSociedad,
+      numIdDocumento;

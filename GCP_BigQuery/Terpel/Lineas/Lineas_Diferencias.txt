@@ -1,0 +1,35 @@
+
+
+-- // COMPARACION DE LO QUE SE OBTIENE EN GCP VS QLIK
+WITH facturasIndustria As (
+  SELECT  
+    EXTRACT(YEAR FROM oCalendarioKey) As Anio, 
+    EXTRACT(MONTH FROM oCalendarioKey) As Mes,
+    Numero_Factura As Numero_Factura_GCP,
+    --oCalendarioKey,
+    ROUND(SUM(Volumen_Vendido)) As Volumen_GCP
+    --Volumen_Vendido
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.LineaIndustria_Facturacion`
+  WHERE oCalendarioKey >= '2021-11-01'
+  GROUP BY Anio, Mes, Numero_Factura_GCP
+  ORDER BY Anio, Mes, Numero_Factura_GCP),
+
+  cifrasQlik As (
+    SELECT
+      A__o As Anio,
+      Mes,
+      CAST(N__mero_Factura As STRING) As Numero_Factura_Qlik,
+      Volumen As Volumen_Qlik
+    FROM SAP_resultados_VP_Comercial_Combustibles.LineaIndustria_CifrasQlik
+    ORDER BY Numero_Factura_Qlik )
+
+SELECT 
+  A.*,
+  B.Volumen_Qlik,
+  B.Numero_Factura_Qlik 
+FROM facturasIndustria A
+LEFT JOIN cifrasQlik B
+  ON(A.Numero_Factura_GCP = B.Numero_Factura_Qlik)   
+WHERE A.Volumen_GCP <> B.Volumen_Qlik OR Numero_Factura_GCP IS NULL OR Numero_Factura_Qlik IS NULL
+ORDER BY Anio, Mes, Numero_Factura_GCP;
+

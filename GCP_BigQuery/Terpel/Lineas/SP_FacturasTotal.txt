@@ -1,0 +1,373 @@
+
+CREATE OR REPLACE PROCEDURE SAP_resultados.SP_FacturasTotal()
+BEGIN
+
+
+---------------------------------- PASO 1 - DECLARACIÓN DE VARIABLES Y FUNCIONES ------------------------------------------
+-- 1.1 VARIABLES
+-- Entero que define el maximo de ciclos que debe realizar el while en el PASO 2.3.1
+/*
+DECLARE vCountTotal INT64 DEFAULT 1;
+
+-- Entero que define el contador del numero de ciclos que debe realizar el while en el PASO 2.3.1
+DECLARE vCountTemp INT64 DEFAULT 1;
+*/
+
+-- 1.2 FUNCIONES
+-- vCondicionalClaseFacturaNegativo
+CREATE OR REPLACE FUNCTION SAP_resultados.vCondicionalClaseFacturaNegativo(x STRING) AS (
+  REGEXP_CONTAINS(x, '^(B1|B1E|B2|B2E|B3|B3E|B4|BK1|BK3|FAS|FXG|G2|G2S|IG|IGA|IVS|LG|LRS|RE|S1|S3|SHR|SV|Z2NC|Z2NI|Z3DC|Z3DG|Z3DL|Z3DR|Z3K2|Z3NA|Z3NC|Z3NE|Z3NL|Z3NM|ZDCG|ZDCR|ZDDC|ZDEC|ZDEV|ZDGR|ZDME|ZNCC|ZNCE|ZNCG|ZNCI|ZNCO|ZNCT|ZNME|ZNMX|ZNRE|ZS1|ZNCR)$'));
+
+
+
+---------------------------------- PASO 2 - CREACION DE LA TABLA FACTURAS TOTAL ------------------------------------------
+--   From 2.Transform_Facturacion
+ /*
+    PASO 2.1 -> CREACIÓN DE LA TABLA BASE FACTURACION 
+    Aqui traemos el historico de la ZFACTFLUDES para la Sociedad 1000
+
+    Tablas transaccionales
+        terpel-gtic-datalake.SAP_datarefinada.ZFACTFLUDES_SD
+
+*/
+CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.BaseFacturacion As
+SELECT DISTINCT
+  Sociedad,
+  Sector,
+  Grupo_de_vendedores,
+  Canal_distribucion,
+  Organizacion_ventas,
+  Centro_de_beneficio,
+  Centro,
+  Oficina_de_ventas,
+  REPLACE(LTRIM(REPLACE(Material, '0', ' ')), ' ', '0') Material,
+  CAST(Fecha_factura As DATE) As Fecha_factura,
+  REPLACE(LTRIM(REPLACE(Solicitante, '0', ' ')), ' ', '0') Solicitante,
+  Grupo_de_clientes_1,
+  Grupo_de_clientes_2,
+  Grupo_de_clientes_3,
+  Grupo_de_clientes_4,
+  REPLACE(LTRIM(REPLACE(Documento_modelo, '0', ' ')), ' ', '0') Documento_modelo,
+  Tp_doc_anterior,
+  Importe_del_impuesto,
+  Valor_neto,
+  Clase_de_factura,
+  Cantidad_facturada,
+  Ctd_factura_UME,
+  Volumen,
+  REPLACE(LTRIM(REPLACE(Factura_VBELN, '0', ' ')), ' ', '0') As Factura_VBELN,
+  Un_medida_venta,
+  Unidad_medida_base,
+  Tipo_doc_comercial,
+  Posicion,
+  Status_contabilidad,
+  --REPLACE(LTRIM(REPLACE(N__condicion_docum_, '0', ' ')), ' ', '0') N__condicion_docum_,
+  N__condicion_docum_,
+  'ZFACTFLUDES_SD' As Origen,
+  Tp_doc_anterior As Tipo_Factura,
+  Status_contabilidad As StatusContabilidad,
+  Clase_de_factura As Clase_Factura
+FROM `terpel-gtic-datalake.SAP_datarefinada.ZFACTFLUDES_SD`
+WHERE Sociedad IN ('1000','1900');
+
+
+
+/*
+    PASO 2.2 -> CREACIÓN DE LA TABLA TEMPORAL DE DESTINATARIOS
+    Aqui traemos el historico de la ZDESTINOS
+
+    Tablas transaccionales
+        terpel-gtic-datalake.SAP_datarefinada.ZDESTINOS_FACT
+
+*/
+CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.TmpDestinatarios As
+SELECT DISTINCT
+  REPLACE(LTRIM(REPLACE(Factura, '0', ' ')), ' ', '0') As Factura,
+  Posicion__SD_,
+  CAST(Fecha_factura As DATE) As Fecha_factura,
+  REPLACE(LTRIM(REPLACE(Cliente, '0', ' ')), ' ', '0') As Cliente,
+  Doc_factur_anulado,
+  Hora
+FROM `terpel-gtic-datalake.SAP_datarefinada.ZDESTINOS_FACT`
+ORDER BY Factura, Posicion__SD_;
+
+
+
+/*
+    PASO 2.3 -> CREACIÓN DE LA TABLA CODIGO DESTINATARIOS
+    Se trae la información del destinatario de TempDestinatarios a la BaseFacturacion
+
+*/
+CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.CodDestinatarios2 As
+WITH codDest As (
+  SELECT DISTINCT
+    Factura As oFacturaAnalisis,
+    Posicion__SD_ As oPosicionAnalisis,
+    Cliente AS  oDestinatarioKey
+  FROM SAP_resultados_VP_Aviacion_Marinos.TmpDestinatarios
+  ORDER BY oFacturaAnalisis),
+
+  baseFact As (
+    SELECT DISTINCT
+      Factura_VBELN As oFacturaAnalisis,
+      Posicion As oPosicionAnalisis
+    FROM SAP_resultados_VP_Aviacion_Marinos.BaseFacturacion
+    ORDER BY oFacturaAnalisis, oPosicionAnalisis)
+
+SELECT 
+  B.oFacturaAnalisis,
+  B.oPosicionAnalisis,
+  A.oDestinatarioKey
+FROM codDest A
+RIGHT JOIN baseFact B
+USING (oFacturaAnalisis, oPosicionAnalisis) 
+ORDER BY oFacturaAnalisis, oPosicionAnalisis;  
+
+
+
+/* ESTE ES EL CODIGO QUE PERMITE HACER LOS PEEKS Y REEMPLAZARIA EL WHILE SIGUIENTE.
+
+*/
+CREATE OR REPLACE TABLE SAP_resultados_VP_Aviacion_Marinos.CodDestinatarios As
+SELECT 
+  oFacturaAnalisis,
+  oPosicionAnalisis,
+  oDestinatarioKey,
+  LAST_VALUE(oDestinatarioKey IGNORE NULLS) OVER(PARTITION BY oFacturaAnalisis
+                               ORDER BY oFacturaAnalisis, oPosicionAnalisis, oDestinatarioKey
+                               ROWS UNBOUNDED PRECEDING) As oDestinatarioFinal
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.CodDestinatarios2`
+--WHERE oFacturaAnalisis = '7100034885'
+ORDER BY oFacturaAnalisis, oPosicionAnalisis;
+
+
+
+/*
+  PASO 2.3.1:
+  AQUI INICIA EL PROCESO DE IF( LEN(oDestinatarioKey)=0 , Peek('oDestinatarioFinal'), oDestinatarioKey) as oDestinatarioFinal
+
+  Se utiliza un while que terminará cuando el contador vCountTemp sea igual al mayor numero de veces que se repite una factura. 
+
+
+-- Esta tabla tendrá el numero de veces que se repite cada categoria de factura.
+CREATE OR REPLACE TEMP TABLE CountByCategory As
+WITH countsCat As(
+  SELECT DISTINCT 
+    CAST(oFacturaAnalisis As STRING) Category,
+    COUNT(CAST(oFacturaAnalisis As STRING)) counts
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.CodDestinatarios`
+  WHERE CAST(oFacturaAnalisis As STRING) IS NOT NULL 
+  GROUP BY Category)
+
+SELECT 
+  *
+FROM countsCat;
+
+-- esta variable indica el maximo numero de veces que se repite oFactura, es decir, al valor que hay que igualar.
+-- SET vCountTotal = (SELECT MAX(counts) FROM CountByCategory);
+SET vCountTotal = 10;
+
+-- Aqui inicial el while, vCountTemp va a recorrer hasta el maximo de veces repetidas que haya en oFactura.
+WHILE vCountTemp <= vCountTotal DO
+  
+
+  
+  -- es necesario usar un while porque la funcion LAG no tiene la capacidad de acumular por lo que oDestinatarioKey debe tomar 
+  -- el valor de lo que se obtenga en oDestinatarioFinal y repetir el procedimiento. 
+  CREATE OR REPLACE TEMP TABLE CodDestinatariosFinal As
+  WITH TempDest AS (SELECT 
+    oFacturaAnalisis, 
+    oPosicionAnalisis,
+    oDestinatarioKey,
+    IF( oFacturaAnalisis = LAG(oFacturaAnalisis) OVER (ORDER BY oFacturaAnalisis)  AND oDestinatarioKey IS NULL,
+        LAG(oDestinatarioKey) OVER (ORDER BY oFacturaAnalisis, oPosicionAnalisis ), oDestinatarioKey) As oDestinatarioFinal	
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.CodDestinatarios`
+  ORDER BY oFacturaAnalisis, oPosicionAnalisis)
+  
+
+  -- Aqui es donde se actualiza oDestinatarioKey con el valor de oDestinatarioFinal.
+  SELECT 
+    oFacturaAnalisis, 
+    oPosicionAnalisis,
+    oDestinatarioFinal As oDestinatarioKey,
+    oDestinatarioFinal
+  FROM TempDest
+  ORDER BY oFacturaAnalisis, oPosicionAnalisis;
+
+
+  -- Finalmente guardamos lo obtenido en la misma tabla
+  CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.CodDestinatarios` As
+  SELECT *
+  FROM CodDestinatariosFinal
+  ORDER BY oFacturaAnalisis, oPosicionAnalisis;
+  
+
+  --Aqui simplemente añadimos 1 al conteo del while
+  SET vCountTemp = vCountTemp+1;
+
+END WHILE; 
+
+
+-- Borramos la temporal usada en el while
+DROP TABLE IF EXISTS CodDestinatariosFinal;
+
+
+
+/*
+    PASO 2.4 -> CREACIÓN DE LA TABLA CODIGO DESTINATARIOS FINAL
+    - Agrega DocAnulacion y HoraFactura de TmpDestinatarios al resultado del WHILE guardado en CodDestinatarios.
+    - Agrega ClaseDocAnulacion de BaseFacturacion a CodDestinatarioFinal.
+
+*/
+-- Agrega DocAnulacion y HoraFactura de TmpDestinatarios al resultado del WHILE guardado en CodDestinatarios.
+CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.CodDestinatariosFinal_TMP` As
+WITH CodDestinatarios As(
+  SELECT  
+    oFacturaAnalisis, 
+    oPosicionAnalisis,
+    oDestinatarioFinal As oDestinatarioKey
+  FROM SAP_resultados_VP_Aviacion_Marinos.CodDestinatarios
+  ORDER BY oFacturaAnalisis, oPosicionAnalisis),
+  
+  TempDestin As (
+  SELECT DISTINCT
+    Factura As oFacturaAnalisis,
+    REPLACE(LTRIM(REPLACE(Doc_factur_anulado, '0', ' ')), ' ', '0') as DocAnulacion, -- LESB Cambio 1/04/2022 -> Limpieza de ceros a la izquierda para que coincida con las facturas limpiadas de BaseFacturacion (línea 265)
+    -- Doc_factur_anulado As DocAnulacion,
+    Hora As HoraFactura
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.TmpDestinatarios`
+  ORDER BY oFacturaAnalisis)
+
+SELECT 
+  A.*,
+  B.DocAnulacion,
+  B.HoraFactura 
+FROM CodDestinatarios A
+LEFT JOIN TempDestin B 
+  USING(oFacturaAnalisis)
+ORDER BY oFacturaAnalisis, oPosicionAnalisis;
+
+
+-- Aqui agrega el campo ClaseDocAnulacion a lo que ya tenemos en CodDestinatariosFinal 
+CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.CodDestinatariosFinal` As
+WITH BaseFact As (
+  SELECT DISTINCT
+    Factura_VBELN As DocAnulacion,
+    Clase_de_factura As ClaseDocAnulacion
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.BaseFacturacion`
+  ORDER BY DocAnulacion)
+
+SELECT 
+  A.*,
+  C.ClaseDocAnulacion 
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.CodDestinatariosFinal_TMP` A
+LEFT JOIN BaseFact C 
+  USING(DocAnulacion)
+ORDER BY oFacturaAnalisis, oPosicionAnalisis;
+
+
+
+/*
+    PASO 2.5 -> CONCATENAR TODO A BASE FACTURACION
+    - Agrega todo de CodDestinatarioFinal en BaseFacturacion.
+
+*/
+CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.BaseFacturacion_F` As
+WITH CodDestinatariosFinal As (
+  SELECT DISTINCT
+    oFacturaAnalisis as Factura_VBELN,
+	  oPosicionAnalisis As Posicion,
+    oDestinatarioKey As Destinatario,
+    DocAnulacion, 
+    HoraFactura,
+    ClaseDocAnulacion
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.CodDestinatariosFinal` 
+  ORDER BY DocAnulacion)
+
+SELECT 
+  A.*,
+  B.Destinatario,
+  B.HoraFactura,
+  B.DocAnulacion,
+  B.ClaseDocAnulacion 
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.BaseFacturacion` A
+LEFT JOIN CodDestinatariosFinal B 
+  USING(Factura_VBELN, Posicion)
+ORDER BY Factura_VBELN, Posicion;
+
+
+
+
+/*
+    PASO 2.6 -> CREACION DE LA TABLA FACTURAS TOTAL
+    Se realizan ciertas transformaciones y renombres a BaseFacturacion.
+
+*/
+CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados.FacturasTotal` As
+SELECT 
+  Sociedad,
+  Sector,
+  Grupo_de_vendedores,
+  Canal_distribucion,
+  Organizacion_ventas,
+  Centro,
+  Oficina_de_ventas,
+  Grupo_de_clientes_2,
+  Fecha_factura As oCalendarioKey,
+  Sociedad As oSociedadkey,
+  LEFT(Centro_de_beneficio,3) As oZVKey,
+  Grupo_de_clientes_1 As oSegmento1Key,
+  Grupo_de_clientes_2 As oSegmento2Key,
+  Grupo_de_clientes_3 As oSegmento3Key,
+  Grupo_de_clientes_4 As oSegmento4Key,
+  Oficina_de_ventas As oOficinaVentaKey,
+  Centro_de_beneficio As oCentroBeneficioKey,
+  Canal_distribucion As oCanalKey,
+  Solicitante AS oClienteKey,
+  Material As oProductoKey,
+  Documento_modelo As oDespachoKey,
+  Sector As oSectorKey,
+  Centro As oCentroLogisticoKey,
+  IF((SELECT SAP_resultados.vCondicionalClaseFacturaNegativo(Clase_Factura)), Importe_del_impuesto * -1, Importe_del_impuesto) As Importe_Impuesto,
+  IF((SELECT SAP_resultados.vCondicionalClaseFacturaNegativo(Clase_Factura)), Valor_neto * -1, Valor_neto) As Valor_Vendido,
+  IF((SELECT SAP_resultados.vCondicionalClaseFacturaNegativo(Clase_Factura)), Cantidad_facturada * -1, Cantidad_facturada) As Volumen_Vendido,
+  IF((SELECT SAP_resultados.vCondicionalClaseFacturaNegativo(Clase_Factura)), Ctd_factura_UME * -1, Ctd_factura_UME) As Cantidad_Entrega,
+  IF((SELECT SAP_resultados.vCondicionalClaseFacturaNegativo(Clase_Factura)), Volumen * -1, Volumen) As Volumen_Facturado,
+  Un_medida_venta As Unidad_Medida_Venta,
+  Unidad_medida_base As Unidad_Medida_Base,
+  Cantidad_facturada As VolumenOriginal,
+  Factura_VBELN As Numero_Factura,
+  Clase_Factura,
+  Tp_doc_anterior As Tipo_Factura,
+  Posicion,
+  Destinatario as oDestinatarioKey,
+  DocAnulacion, 
+  HoraFactura,
+  ClaseDocAnulacion as Clasedocanulacion, 
+  Statuscontabilidad as Statuscontabilidad,
+  IF(Statuscontabilidad = 'C', 'Contabilizada', 'No Contabilizada') As EstadoFactura,
+  IF(Tp_doc_anterior IN('J','H'), 'Inventariable', IF(Tp_doc_anterior IN('C','K'), 'No Inventariable', 'No Asignada')) As TipoInventario,
+  Centro_de_beneficio As CentroBeneficio,
+  Canal_distribucion As Canal,
+  Grupo_de_clientes_1 As Grupocliente1,
+  '' As TipoFactDocAnulacion,
+  N__condicion_docum_ As NoCondicion
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.BaseFacturacion_F`
+ORDER BY Numero_Factura, Posicion; 
+
+
+
+/*
+    PASO 3 -> OPTIMIZACION
+    Eliminacion de tablas temporales
+
+*/
+DROP TABLE IF EXISTS SAP_resultados_VP_Aviacion_Marinos.BaseFacturacion_F;
+DROP TABLE IF EXISTS SAP_resultados_VP_Aviacion_Marinos.BaseFacturacion;
+DROP TABLE IF EXISTS SAP_resultados_VP_Aviacion_Marinos.CodDestinatarios;
+DROP TABLE IF EXISTS SAP_resultados_VP_Aviacion_Marinos.CodDestinatarios2;
+DROP TABLE IF EXISTS SAP_resultados_VP_Aviacion_Marinos.CodDestinatariosFinal;
+DROP TABLE IF EXISTS SAP_resultados_VP_Aviacion_Marinos.TmpDestinatarios;
+
+
+END

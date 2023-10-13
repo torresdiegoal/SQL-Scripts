@@ -1,0 +1,68 @@
+
+
+
+DECLARE vFechaEjecucion DATE DEFAULT (SELECT CURRENT_DATE('UTC-5'));
+DECLARE vUltimoDia_Liquidaciones DATE DEFAULT '2022-01-01';
+
+---
+ WITH segmentoCU As (
+    SELECT 
+      Codigo_UnicoFact As oCodigoUnico, 
+      CalendarioKeyFact As oCalendarioKey,  
+      Volumen_Vendido As Volumen_compra
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.LineaEDSGNV_FacturasEDS_SegmentoCU` A 
+  /* FROM `terpel-gtic-datalake.satelite_resultados_VP_Comercial_Combustible.Margen_Costo_Facturas` A  Condiciones_Costo_Margen_Franquicias
+    2022-04-25 DATR: cambia el apuntamiento del modelo de margen a Linea EDS-GNV para obtener el Volumen_compra*/
+    WHERE  A.CalendarioKeyFact BETWEEN vUltimoDia_Liquidaciones 
+      AND vFechaEjecucion
+      --AND LAST_DAY (vFechaRecarga, MONTH)
+    ORDER BY oCodigoUnico, oCalendarioKey   ),
+
+    segmentosHistTemp As (
+    SELECT DISTINCT
+      CodigoUnico,
+      oCalendarioSegmento,
+      --Segmento_historico_maestro
+      Regla_Segmento -- 
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos` 
+    ORDER BY CodigoUnico, Regla_Segmento
+    )
+
+
+     SELECT DISTINCT
+      A.oCodigoUnico,   
+      DATE_TRUNC( A.oCalendarioKey, MONTH) As oCalendarioKey,
+      B.Regla_Segmento,
+      SUM(Volumen_compra) As Volumen_compra
+    FROM segmentoCU A  
+    LEFT JOIN segmentosHistTemp B
+    --  ON (A.oCodigoUnico  = B.CodigoUnico AND A.Mes_Anio = B.Anio_mes_segmento)  
+      ON (A.oCodigoUnico  = B.CodigoUnico AND A.oCalendarioKey = B.oCalendarioSegmento) 
+    WHERE  oCodigoUnico = 'EDS3206'
+    GROUP BY oCodigoUnico, oCalendarioKey, B.Regla_Segmento
+    ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+
+/*
+-- DA LOS COD UNICOS CON INFORMACION DESACTUALIZADA, DANDO LA FECHA MAXIMA ALMACENADA
+WITH codUnicos_HS As (
+    SELECT DISTINCT CodigoUnico
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos
+    ORDER BY CodigoUnico),
+    
+    tempS As (
+  SELECT DISTINCT
+  Codigo_UnicoFact, MAX(CalendarioKeyFact) As Fecha
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.LineaEDSGNV_FacturasEDS_SegmentoCU` 
+GROUP BY Codigo_UnicoFact
+ORDER BY Codigo_UnicoFact
+)
+
+SELECT A.*
+FROM tempS A
+    INNER JOIN codUnicos_HS B
+      ON( A.Codigo_UnicoFact = B.CodigoUnico)
+WHERE Fecha < '2022-05-01'
+ORDER BY Codigo_UnicoFact;
+*/

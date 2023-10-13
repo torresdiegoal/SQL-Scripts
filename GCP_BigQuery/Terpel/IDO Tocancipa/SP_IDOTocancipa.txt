@@ -1,0 +1,1175 @@
+CREATE OR REPLACE PROCEDURE `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.SP_IDOTocancipa_Fact` (TIPO_CONSULTA INT64)
+BEGIN
+    
+
+---------------------------- PROCEDIMIENTO ALMACENADO PARA EL CALCULO DEL INVENTARIO IDO_Tocancipa -----------------------------    
+    
+    /*
+    IDO_Tocancipa calcula el inventario final (InvFinal) con el que termina cada mes mediante la acumulación de los inventarios finales diarios y los 
+    inventarios con los que cierra el mes anterior. Este proceso parte siempre del cierre del último mes liquidado y toma los movimientos día a día 
+    para liquidar el mes actual. La liquidación sólo se da el ultimo día de cada mes. 
+
+    Para esto se ejecutan los siguientes pasos
+
+    PASO 1 - DECLARACIÓN DE VARIABLES: En este paso se crean todas las variables necesarias para el proceso
+    PASO 2 - CREACIÓN DE LA TABLA DE INICIO: Este paso consiste en crear la tabla que toma los valores del mes de cierre, más los valores del mes siguiente y crea la tabla para iniciar 
+            los calculos del mes siguiente
+    PASO 3 - CREACIÓN DE LA TABLA DE CALCULOS DEL MES ACTUAL: Este proceso toma el resultado del paso anterior y realiza el calculo dia a dia del inventario hasta el dia donde haya moviento
+            en caso de que no hayan valores para un día, incluye movimientos con falsos ceros para lograr la acumulación         
+    */
+
+    
+
+    ------------------------------------------------- PASO 1 - DECLARACIÓN DE VARIABLES ----------------------------------------------
+    
+    -- Variable para encontrar el último día de la información del cierre mensual, se inicaliza con una fecha estandar pero luego toma la fecha más reciente del cierre mensual
+    DECLARE vMaxDateCierreMensual_IDO DATE DEFAULT (SELECT CAST(Max(oCalendarioKey) AS DATE) AS  oCalendarioKey  
+                                                    FROM `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual`); 
+    
+    -- Variable creada para saber primer día del MES ACTUAL
+    DECLARE vPrimerDiaMes_IDO DATE DEFAULT vMaxDateCierreMensual_IDO+1;
+
+    -- Variable creada para saber el último día del MES ACTUAL
+    --DECLARE vUltimoDiaMes_IDO DATE DEFAULT ( SELECT MAX(Fe_contabilizacion) FROM `terpel-gtic-datalake.SAP_datarefinada.MSEG` WHERE Fe_contabilizacion BETWEEN vPrimerDiaMes_IDO AND LAST_DAY(vPrimerDiaMes_IDO, MONTH));
+    DECLARE vUltimoDiaMes_IDO DATE DEFAULT LAST_DAY(vPrimerDiaMes_IDO, MONTH);
+
+    -- Variable fecha que determina la fecha maxima contenida en la MSEG para el mes procesado
+    DECLARE vDiaActual_MSEG DATE DEFAULT (SELECT CURRENT_DATE() AS the_date);
+
+    -- Variable fecha creada para saber la fecha actual (HOY)
+    DECLARE vFechaActual DATE DEFAULT (SELECT CURRENT_DATE() AS the_date);
+
+    -- Variable int creada para determinar el año actual del proceso
+    DECLARE AnioActual INT64 DEFAULT 0;
+
+    -- Variable string creada para determinar el nombre del mes actual del proceso
+    DECLARE MesActual STRING DEFAULT '';
+
+    -- Variable string creada para determinar el mesAño actual del proceso
+    DECLARE temp_table STRING DEFAULT '';
+
+    -- Variable creada para determinar la query dinamica para el renombre de tablas temporales
+    DECLARE Dynamic_query STRING DEFAULT '';
+
+
+    -- Variables creadas para el PASO 3: ciclo del calculo del inventario mes actual
+    DECLARE vFechaIni DATE DEFAULT vPrimerDiaMes_IDO;
+    DECLARE vFloorMaxDateNext STRING DEFAULT '';
+    DECLARE vFloorMaxDateLast STRING DEFAULT ''; 
+
+
+    IF TIPO_CONSULTA = 1 THEN
+      SET vMaxDateCierreMensual_IDO = LAST_DAY(DATE_SUB(vMaxDateCierreMensual_IDO, INTERVAL 1 MONTH), MONTH); 
+      SET vPrimerDiaMes_IDO = vMaxDateCierreMensual_IDO+1;
+      SET vUltimoDiaMes_IDO = LAST_DAY(vPrimerDiaMes_IDO, MONTH); 
+      SET vFechaActual = LAST_DAY(vPrimerDiaMes_IDO, MONTH);
+      SET vFechaIni = vPrimerDiaMes_IDO;
+    END IF;
+
+
+    
+ --------------------------------------  PASO 2 - CREACIÓN DE LA TABLA DE INICIO -------------------------------------------------
+
+    /*-- PASO 2.1 -> CREACIÓN DE LA TABLA DE LOS MOVIMIENTOS DEL NUEVO MES
+    Este paso carga la información necesaria para el inventario desde las siguientes tablas y toman como rengo de fecha lo definido en las variables vPrimerDiaMes_IDO y vUltimoDiaMes_IDO  
+
+    Tablas transaccionales
+        terpel-gtic-datalake.SAP_datarefinada.MSEG
+        terpel-gtic-datalake.SAP_datarefinada.T001L
+    Tablas Maestras
+        terpel-gtic-datalake.SAP_archivos_maestros.IDO_Tocancipa_Maestro_Productos
+        terpel-gtic-datalake.SAP_archivos_maestros.IDO_Tocancipa_Maestro_Mayorista
+        terpel-gtic-datalake.SAP_archivos_maestros.IDO_Tocancipa_Maestro_Sociedad
+        terpel-gtic-datalake.SAP_archivos_maestros.IDO_Tocancipa_Maestro_Planta
+        terpel-gtic-datalake.SAP_archivos_maestros.IDO_Tocancipa_Maestro_ClasedeMovimiento
+        terpel-gtic-datalake.SAP_archivos_maestros.IDO_Tocancipa_Maestro_Stock_Especial
+        terpel-gtic-datalake.SAP_archivos_maestros.IDO_Tocancipa_Maestro_Almacen
+    */
+
+  -- PASO 2.1.1: CREAR MAESTRA ALMACENES
+   CREATE OR REPLACE TABLE SAP_resultados_VP_Operac_Logist_Invent.IDO_Maestro_Almacenes AS 
+      SELECT
+        T.Almacen,
+        tabla_almacen.Almacen AS almacenes
+      FROM
+        `terpel-gtic-datalake.SAP_datarefinada.T001L` AS T
+      JOIN
+        `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.IDO_Tocancipa_Maestro_Almacen` AS tabla_almacen
+      ON
+        T.Denominacion_almacen = tabla_almacen.Almacen
+      GROUP BY
+        T.Almacen,
+        almacenes; 
+
+  -- PASO 2.1.2: CREAR TABLA PRINCIPAL
+    CREATE OR REPLACE TABLE SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual AS
+    WITH Temp1 AS (
+      SELECT
+        MSEG_.Fe_contabilizacion AS Fecha,
+        CAST(MSEG_.Sociedad AS STRING) AS Sociedad,
+        MSEG_.Centro AS Centro,
+        REPLACE(LTRIM(REPLACE(MSEG_.Proveedor_LIFNR,'0',' ')),' ','0') AS Cod_proveedor,
+        REPLACE(LTRIM(REPLACE(MSEG_.Material,'0',' ')),' ','0') AS Cod_producto, 
+        CAST(MSEG_.Clase_de_Movimiento AS STRING) AS ClaseMovimiento,
+        MSEG_.Indicador_Debe_Haber_SHKZG AS SHKZG,
+        CASE WHEN MSEG_.Indicador_Debe_Haber_SHKZG = 'H' THEN MSEG_.Cantidad_MENGE*-1 ELSE MSEG_.Cantidad_MENGE END AS Cantidad,
+        CASE WHEN MSEG_.Indicador_Debe_Haber_SHKZG = 'H' THEN MSEG_.Ctd_en_UM_entrada_ERFMG*-1 ELSE MSEG_.Ctd_en_UM_entrada_ERFMG END AS CantidadUGL,
+        MSEG_.Almacen AS Almacen,
+        MSEG_.Stock_Especial AS StockEspecial
+      FROM
+        `terpel-gtic-datalake.SAP_datarefinada.MSEG` AS MSEG_
+      INNER JOIN
+        `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.IDO_Tocancipa_Maestro_Productos` AS tabla_productos
+      ON
+        REPLACE(LTRIM(REPLACE(MSEG_.Material,'0',' ')),' ','0') = CAST(tabla_productos.Producto AS STRING)
+      INNER JOIN
+        `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.IDO_Tocancipa_Maestro_Mayoristas` AS tabla_proveedores
+      ON
+        REPLACE(LTRIM(REPLACE(MSEG_.Proveedor_LIFNR,'0',' ')),' ','0') = CAST(tabla_proveedores.Codigo__LIFNR_ AS STRING)
+      INNER JOIN
+        `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.IDO_Tocancipa_Maestro_Sociedad` AS tabla_sociedad
+      ON
+        MSEG_.Sociedad = CAST(tabla_sociedad.Sociedad AS STRING)
+      INNER JOIN
+        `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.IDO_Tocancipa_Maestro_Planta` AS tabla_centro
+      ON
+        MSEG_.Centro = tabla_centro.Codigo__WERKS_
+      INNER JOIN
+        `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.IDO_Tocancipa_Maestro_ClasedeMovimientos` AS tabla_claseMov
+      ON
+        MSEG_.Clase_de_movimiento = CAST(tabla_claseMov.Clase_de_Movimientos AS STRING)
+      INNER JOIN
+        `terpel-gtic-datalake.SAP_archivos_maestros_datarefinada.IDO_Tocancipa_Maestro_Stock_Especial` AS tabla_stockEsp
+      ON
+        MSEG_.Stock_especial = tabla_stockEsp.Stock_Especial
+      WHERE
+        Fe_contabilizacion BETWEEN vPrimerDiaMes_IDO AND vUltimoDiaMes_IDO)
+
+    SELECT
+      Sociedad AS oSociedadKey,
+      Centro AS oCentroKey,
+      Temp1.Almacen AS oAlmacenKey,
+ /*-- En este paso se realiza la solicitud de remplazar Proveedor 610617 por 513773 */
+      --REPLACE(Cod_proveedor,'610617','513773') AS oProveedorKey,
+  /*    CASE Cod_proveedor
+        WHEN '610617' THEN '616841'
+        WHEN '513773' THEN '616841'
+        ELSE Cod_proveedor
+      END as oProveedorKey,*/
+      IFNULL(CAST(Codigo_Nuevo as STRING),Cod_proveedor) as oProveedorKey,
+      Cod_producto AS oProductoKey,
+      Fecha AS oCalendarioKey,
+      ClaseMovimiento,
+      Cantidad,
+      CantidadUGL
+    FROM
+      Temp1
+    JOIN
+      SAP_resultados_VP_Operac_Logist_Invent.IDO_Maestro_Almacenes As Almacen_1
+    ON
+      Temp1.Almacen = Almacen_1.Almacen
+    LEFT JOIN SAP_archivos_maestros_datarefinada.IDO_Tocancipa_Maestro_NewCodSAP_Mayoristas
+    ON Cod_proveedor = CAST(Codigo_Antiguo as STRING)
+    ORDER BY
+      oSociedadKey,
+      oCentroKey,      
+      oAlmacenKey,
+      oProveedorKey,
+      oProductoKey,
+      oCalendarioKey,
+      ClaseMovimiento;
+
+  
+/* 
+   En principio se genera una variable que contendrá la ultima fecha en la tabla MesActual.
+   Ajustamos esta variable con la fecha maxima del subgrupo tomado de la MSEG contenido en IDO_Resultados_MesActual, con esta
+   crearemos la tabla de FalsosCeros  
+*/
+    SET vDiaActual_MSEG = (SELECT MAX(oCalendarioKey) FROM SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual);
+
+/* 
+  Aqui debe ir la validacion para el mov 412. 
+
+  Aqui evaluamos la condicion para ver si se le agrega el mov 412. La condicion será si el año de vDiaActual_MSEG es 2015
+y el mes el Noviembre 
+
+*/
+    IF ((SELECT EXTRACT(YEAR FROM vDiaActual_MSEG) = 2015) AND (SELECT EXTRACT(MONTH FROM vDiaActual_MSEG) = 11))
+    THEN 
+      INSERT INTO SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual 
+      VALUES('1000','1P73', 'T002', '610616', '1104',  DATE(2015,11,5),'412', CAST(20 As NUMERIC),CAST(20 As NUMERIC));
+    END IF;
+
+/* 
+  SET vDiaActual_MSEG = (SELECT MAX(oCalendarioKey) FROM SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual);
+  
+  IF ((SELECT EXTRACT(YEAR FROM vDiaActual_MSEG) = 2015) AND (SELECT EXTRACT(MONTH FROM vDiaActual_MSEG) = 11))
+    THEN 
+
+    INSERT INTO SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual 
+    SELECT
+      CAST(MSEG_.Sociedad AS STRING) AS oSociedadKey,
+      MSEG_.Centro AS oCentroKey,
+      MSEG_.Almacen AS oAlmacenKey,
+      REPLACE(LTRIM(REPLACE(MSEG_.Proveedor_LIFNR,'0',' ')),' ','0') AS oProveedorKey,
+      REPLACE(LTRIM(REPLACE(MSEG_.Material,'0',' ')),' ','0') AS oProductoKey,
+      MSEG_.Fe_contabilizacion AS oCalendarioKey,
+      CAST(MSEG_.Clase_de_Movimiento AS STRING) AS ClaseMovimiento,
+      CASE WHEN MSEG_.Indicador_Debe_Haber_SHKZG = 'H' THEN MSEG_.Cantidad_MENGE*-1 ELSE MSEG_.Cantidad_MENGE END AS Cantidad,
+      CASE WHEN MSEG_.Indicador_Debe_Haber_SHKZG = 'H' THEN MSEG_.Ctd_en_UM_entrada_ERFMG*-1 ELSE MSEG_.Ctd_en_UM_entrada_ERFMG END AS CantidadUGL,
+    FROM
+      `terpel-gtic-datalake.SAP_datarefinada.MSEG` AS MSEG_
+    WHERE Sociedad = '1000'
+     AND Centro = '1P73'
+     AND Almacen = 'T002'
+     AND Proveedor_LIFNR LIKE '%610616'
+     AND Material LIKE '%1104'
+     AND Fe_contabilizacion = '2015-11-05'
+     AND Clase_de_Movimiento = '412'
+     AND Stock_Especial = 'K';
+
+  END IF;  
+  */
+  
+ 
+
+  /*-- PASO 2.2 -> CREACIÓN DE LA TABLA DE LOS MOVIMIENTOS DEL NUEVO MES TOMANDO UNICAMENTE LAS CLASES DE MOVIMIENTO QUE SE 
+                    NECESITAN EN EL INVENTARIO*/
+
+    CREATE OR REPLACE TEMP TABLE IDO_Resultados_MesActual_Calculos1 AS
+    WITH MSEG_temp AS(
+      SELECT
+        oSociedadKey,
+        oCentroKey,
+        oAlmacenKey,
+        oProveedorKey,
+        oProductoKey,
+        oCalendarioKey,
+        CASE WHEN ClaseMovimiento = '501' THEN Cantidad ELSE 0 END AS _501_,
+        CASE WHEN ClaseMovimiento = '502' THEN Cantidad ELSE 0 END AS _502_,
+        CASE WHEN ClaseMovimiento = '997' THEN Cantidad ELSE 0 END AS _997_, 
+        CASE WHEN ClaseMovimiento = '998' THEN Cantidad ELSE 0 END AS _998_,
+        CASE WHEN ClaseMovimiento = '311' THEN Cantidad ELSE 0 END AS _311_,
+        CASE WHEN ClaseMovimiento = '955' THEN Cantidad ELSE 0 END AS _955_,
+        CASE WHEN ClaseMovimiento = '956' THEN Cantidad ELSE 0 END AS _956_,
+        CASE WHEN ClaseMovimiento = '966' THEN Cantidad ELSE 0 END AS _966_,
+        CASE WHEN ClaseMovimiento = '965' THEN Cantidad ELSE 0 END AS _965_,
+        CASE WHEN ClaseMovimiento = '966' THEN CantidadUGL ELSE 0 END AS _966_UGL,
+        CASE WHEN ClaseMovimiento = '965' THEN CantidadUGL ELSE 0 END AS _965_UGL,
+        CASE WHEN ClaseMovimiento = '946' THEN Cantidad ELSE 0 END AS _946_,
+        CASE WHEN ClaseMovimiento = '947' THEN Cantidad ELSE 0 END AS _947_,
+        CASE WHEN ClaseMovimiento = '938' THEN Cantidad ELSE 0 END AS _938_,
+        CASE WHEN ClaseMovimiento = '939' THEN Cantidad ELSE 0 END AS _939_,
+        CASE WHEN ClaseMovimiento = '312' THEN Cantidad ELSE 0 END AS _312_,
+        CASE WHEN ClaseMovimiento = '412' THEN Cantidad ELSE 0 END AS _412_
+      FROM
+        `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual` )
+        
+    SELECT
+      oSociedadKey,
+      oCentroKey,
+      oAlmacenKey,
+      oProveedorKey,
+      oProductoKey,
+      oCalendarioKey,
+      SUM(_501_) AS _501_,
+      SUM(_502_) AS _502_,
+      SUM(_997_) AS _997_,
+      SUM(_998_) AS _998_,
+      SUM(_311_) AS _311_,
+      SUM(_955_) AS _955_,
+      SUM(_956_) AS _956_,
+      SUM(_966_) AS _966_,
+      SUM(_965_) AS _965_,
+      SUM(_946_) AS _946_,
+      SUM(_947_) AS _947_,
+      SUM(_938_) AS _938_,
+      SUM(_939_) AS _939_,
+      SUM(_312_) AS _312_,
+      SUM(_412_) AS _412_,
+      SUM(_966_UGL) AS _966_UGL,
+      SUM(_965_UGL) AS _965_UGL
+    FROM
+      MSEG_temp
+    GROUP BY
+      oCalendarioKey,
+      oSociedadKey,
+      oCentroKey,
+      oProductoKey,
+      oProveedorKey,
+      oAlmacenKey
+    ORDER BY 
+      oCalendarioKey; 
+
+
+
+  /*
+  PASO 2.3 -> SOBRE LA MISMA TABLA DEL PASO ANTERIOR SE REALIZAN LOS CALCULOS PARA OBTENER LAS COLUMNAS NECESARIAS PARA EL CALCULO
+  DEL INVENTARIO
+
+  /*
+    Columnas obtenidas
+
+        InvPrimerDiaMes
+        InvInicial
+        Recibo,
+        Variaciones_Recibo,
+        Despachos_Volumen_Neto_VSD60,
+        Despachos_Volumen_Bruto,
+        Expansion_Volumetrica,
+        Prestamos,
+        Variacion_de_Almacenamiento
+        InvFinal
+    */
+
+
+    CREATE OR REPLACE TEMP TABLE IDO_Resultados_MesActual_Calculos2 AS
+    WITH MesActual_calculos AS(
+      SELECT
+        oSociedadKey,
+        oCentroKey,
+        oAlmacenKey,
+        oProveedorKey,
+        oProductoKey,
+        oCalendarioKey,
+        CAST(0 AS NUMERIC) AS InvPrimerDiaMes,
+        CAST(0 AS NUMERIC) AS InvInicial,
+        _501_+_502_+_997_+_998_+_311_+_412_+_312_ AS Recibo, /* -_312_ hasta 2021-11-16 */
+        _955_+_956_ AS Variaciones_Recibo,
+        -_965_-_966_ AS Despachos_Volumen_Neto_VSD60,
+        -_965_UGL-_966_UGL AS Despachos_Volumen_Bruto,
+        (-_965_UGL-_966_UGL)-(-_965_-_966_) AS Expansion_Volumetrica,
+        _946_+_947_ AS Prestamos,
+        _938_+_939_ AS Variacion_de_Almacenamiento,
+        CAST(0 AS NUMERIC) AS InvFinal
+      FROM
+        IDO_Resultados_MesActual_Calculos1
+      ORDER BY
+        oCalendarioKey ASC )
+
+    SELECT
+      oSociedadKey,
+      oCentroKey,
+      oAlmacenKey,
+      oProveedorKey,
+      oProductoKey,
+      oCalendarioKey,
+      CAST(0 AS NUMERIC) AS InvPrimerDiaMes,
+      CAST(0 AS NUMERIC) AS InvInicial,
+      Recibo,
+      Variaciones_Recibo,
+      Despachos_Volumen_Neto_VSD60,
+      Despachos_Volumen_Bruto,
+      Expansion_Volumetrica,
+      Prestamos,
+      Variacion_de_Almacenamiento,
+      CAST(0 AS NUMERIC) AS InvFinal
+    FROM
+      MesActual_calculos
+    ORDER BY 
+      oCalendarioKey;
+    /*-- FIN PASO 2.3 -> SOBRE LA MISMA TABLA DEL PASO ANTERIOR SE REALIZAN LOS CALCULOS PARA OBTENER LAS COLUMNAS NECESARIAS PARA EL CALCULO DEL INVENTARIO*/
+
+    /*-- PASO 2.4 -> SOBRE LA MISMA TABLA DEL PASO ANTERIOR SE INSERTAN LOS REGISTROS DEL CIERRE DEL MES ANTERIOR ACODE A LA SIGUIENTE CONFIGURACIÓN EN CADA CAMPO
+
+    oCalendarioKey: Se pone un día más para que inicie en el primer día del mes actual
+    oSociedadKey: Igual que el del mes anterior
+    oCentroKey: Igual que el del mes anterior
+    oProveedorKey: Igual que el del mes anterior
+    NombreProveedor: Igual que el del mes anterior
+    oAlmacenKey: Igual que el del mes anterior
+    oProductoKey: : Igual que el del mes anterior
+    NombreProducto: : Igual que el del mes anterior
+    InvPrimerDiaMes: Igual que el inventario final del mes anterior
+    InvInicial: Igual que el inventario final del mes anterior
+    Recibo: Se asgina el valor 0
+    Variaciones_Recibo: Se asgina el valor 0
+    Despachos_Volumen_Neto_VSD60: Se asgina el valor 0
+    Despachos_Volumen_Bruto: Se asgina el valor 0
+    Expansion_Volumetrica: Se asgina el valor 0
+    Prestamos: Se asgina el valor 0
+    Variacion_de_Almacenamiento: Se asgina el valor 0
+    InvFinal: Se asgina el valor 0
+
+    */
+    INSERT IDO_Resultados_MesActual_Calculos2
+    SELECT
+      oSociedadKey,
+      oCentroKey,
+      oAlmacenKey,
+      IFNULL(CAST(B.Codigo_Nuevo as STRING),oProveedorKey) as oProveedorKey, 
+      oProductoKey,
+      DATE_ADD(oCalendarioKey, INTERVAL 1 DAY) AS oCalendarioKey,
+      InvFinal  AS InvPrimerDiaMes,
+      InvFinal  AS InvInicial,
+      0 AS Recibo,
+      0 AS Variaciones_Recibo,
+      0 AS Despachos_Volumen_Neto_VSD60,
+      0 AS Despachos_Volumen_Bruto,
+      0 AS Expansion_Volumetrica,
+      0 AS Prestamos,
+      0 AS Variacion_de_Almacenamiento,
+      0 AS InvFinal
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual` A
+    LEFT JOIN SAP_archivos_maestros_datarefinada.IDO_Tocancipa_Maestro_NewCodSAP_Mayoristas B
+      ON oProveedorKey = CAST(B.Codigo_Antiguo as STRING)
+    WHERE oCalendarioKey = vMaxDateCierreMensual_IDO;
+    
+    /*--FIN PASO 2.4 -> SOBRE LA MISMA TABLA DEL PASO ANTERIOR SE INSERTAN LOS REGISTROS DEL CIERRE DEL MES ANTERIOR ACORDE A LA SIGUIENTE CONFIGURACIÓN EN CADA CAMPO*/
+
+
+    /*--PASO 2.5 -> SOBRE LA MISMA TABLA DEL PASO ANTERIOR SE SUMARIZAN LOS REGISTROS PARA UNIR TODA LA INFORMACIÓN*/
+    CREATE OR REPLACE TEMP TABLE IDO_Resultados_MesActual_Calculos3 AS
+      SELECT ALL 
+        oSociedadKey,
+        oCentroKey,
+        oAlmacenKey,
+        oProveedorKey,
+        oProductoKey,
+        oCalendarioKey,
+        SUM(InvPrimerDiaMes) AS InvPrimerDiaMes,
+        SUM(InvInicial) AS InvInicial,
+        SUM(Recibo) AS Recibo,
+        SUM(Variaciones_Recibo) AS Variaciones_Recibo,
+        SUM(Despachos_Volumen_Neto_VSD60) AS Despachos_Volumen_Neto_VSD60,
+        SUM(Despachos_Volumen_Bruto) AS Despachos_Volumen_Bruto,
+        SUM(Expansion_Volumetrica) AS Expansion_Volumetrica,
+        SUM(Prestamos) AS Prestamos,
+        SUM(Variacion_de_Almacenamiento) AS Variacion_de_Almacenamiento,
+        SUM(InvFinal) AS InvFinal
+      FROM
+        IDO_Resultados_MesActual_Calculos2
+      GROUP BY
+        oSociedadKey,
+        oCentroKey,
+        oAlmacenKey,
+        oProveedorKey,
+        oProductoKey,
+        oCalendarioKey
+      ORDER BY
+        oSociedadKey,
+        oCentroKey,
+        oAlmacenKey,
+        oProveedorKey,
+        oProductoKey,
+        oCalendarioKey ;
+    /*--FIN PASO 2.4 -> SOBRE LA MISMA TABLA DEL PASO ANTERIOR SE SUMARIZAN LOS REGISTROS PARA UNIR TODA LA INFORMACIÓN*/
+
+
+
+
+---------------------------- PASO 3 - CREACIÓN DE LA TABLA DE CALCULOS DEL MES ACTUAL ----------------------------------
+
+
+
+/*  PASO 3.1 -> CREO UN TABLA CON FALSOS CEROS HACIENDO UN CROSS JOIN ENTRE EL CALENDARIO CREADO EN EL PASO 2 Y LOS DATOS 
+                    DEL MES ACTUAL CON FALSOS CEROS PARA CREAR SLOTS EN LA TABLA QUE CONTIENE LOS MOV DE LA MSEG, DE INFO QUE
+                    VIENE DE CIERRE MENSUAL, PERO NO DE LA MSEG PARA ESE MES.
+    Notas
+        De la tabla del MES ACTUAL se toman los campos de valor en cero y sin fechas, para que producto del CROSS JOIN con el 
+        calendario, estos falsos ceros se repliquen en cada día del rango de fechas del calendario 
+*/
+  CREATE OR REPLACE TEMP TABLE IDO_FalsosCeros AS
+    WITH tempCierreMensual AS (
+      SELECT DISTINCT 
+        oSociedadKey,
+        oCentroKey,
+        oAlmacenKey,
+        oProveedorKey,
+        oProductoKey,
+        0 AS InvPrimerDiaMes,
+        0 AS InvInicial,
+        0 AS Recibo,
+        0 AS Variaciones_Recibo,
+        0 AS Despachos_Volumen_Neto_VSD60,
+        0 AS Despachos_Volumen_Bruto,
+        0 AS Expansion_Volumetrica,
+        0 AS Prestamos,
+        0 AS Variacion_de_Almacenamiento,
+        0 AS InvFinal
+      FROM
+        `SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual`), 
+
+ /* PASO 3.2 -> CREO UN TABLA CALENDARIO CON LA CANTIDAD DE DIAS COMPRENDIDOS ENTRE vPrimerDiaMes_IDO Y vDiaActual_MSEG  */
+      IDO_tmpCalendario AS(
+      SELECT
+        calendario as tmpFecha
+      FROM UNNEST(GENERATE_DATE_ARRAY(vPrimerDiaMes_IDO, vDiaActual_MSEG)) AS calendario
+      ORDER BY tmpFecha)
+/* FIN PASO 3.2 */
+
+    SELECT 
+        oSociedadKey,
+        oCentroKey,
+        oAlmacenKey,
+        oProveedorKey,
+        oProductoKey,
+        tmpFecha As oCalendarioKey,
+        InvPrimerDiaMes,
+        InvInicial,
+        Recibo,
+        Variaciones_Recibo,
+        Despachos_Volumen_Neto_VSD60,
+        Despachos_Volumen_Bruto,
+        Expansion_Volumetrica,
+        Prestamos,
+        Variacion_de_Almacenamiento,
+        InvFinal
+    FROM
+      tempCierreMensual
+    CROSS JOIN
+      IDO_tmpCalendario
+    ORDER BY
+      oCalendarioKey ASC;
+    /*--FIN PASO 3.1 -> CREO UN TABLA CON FALSOS CEROS HACIENDO UN CROSS JOIN ENTRE EL CALENDARIO CREADO EN EL PASO 2 
+                        Y LOS DATOS DEL MES ACTUAL CON FALSOS CEROS */
+
+
+/*--PASO 3.3 -> UNIR A LA TABLA DE MOVIIENTOS DEL MES ACTUAL LOS FALSOS CEROS PARA DONDE ESTA NO TENGA MOVIMIENTOS 
+    
+        Insertamos la tabla de falsos ceros (713) en la de movimientos reales (697), posteriormente las sumamos, recuperando los
+        valores originales pero sumando los registros con movimientos en cero.  */
+    INSERT IDO_Resultados_MesActual_Calculos3
+    SELECT *
+    FROM IDO_FalsosCeros; 
+
+--*/
+    CREATE OR REPLACE TEMP TABLE IDO_Resultados_MesActual_Calculos4 AS
+      SELECT ALL 
+        oSociedadKey,
+        oCentroKey,
+        oAlmacenKey,
+        oProveedorKey,
+        oProductoKey,
+        oCalendarioKey,
+        SUM(InvPrimerDiaMes) AS InvPrimerDiaMes,
+        SUM(InvInicial) AS InvInicial,
+        SUM(Recibo) AS Recibo,
+        SUM(Variaciones_Recibo) AS Variaciones_Recibo,
+        SUM(Despachos_Volumen_Neto_VSD60) AS Despachos_Volumen_Neto_VSD60,
+        SUM(Despachos_Volumen_Bruto) AS Despachos_Volumen_Bruto,
+        SUM(Expansion_Volumetrica) AS Expansion_Volumetrica,
+        SUM(Prestamos) AS Prestamos,
+        SUM(Variacion_de_Almacenamiento) AS Variacion_de_Almacenamiento,
+        SUM(InvFinal) AS InvFinal
+      FROM
+        IDO_Resultados_MesActual_Calculos3 
+      GROUP BY 
+        oSociedadKey,
+        oCentroKey,
+        oAlmacenKey,
+        oProveedorKey,
+        oProductoKey,
+        oCalendarioKey
+      ORDER BY
+        oSociedadKey,
+        oCentroKey,
+        oAlmacenKey,
+        oProveedorKey,
+        oProductoKey,
+        oCalendarioKey ;
+
+    /*--FIN PASO 3.3 -> UNIR A LA TABLA DE MOVIMIENTOS DEL MES ACTUAL LOS FALSOS CEROS PARA DONDE ESTA NO TENGA MOVIMIENTO */
+
+
+
+    /*--PASO 3.3 -> UNO A LA TABLA DE MOVIMIENTOS DEL MES ACTUAL LOS FALSOS CEROS PARA DONDE ESTA NO TENGA MOVIMIENTOS 
+    CREATE OR REPLACE TEMP TABLE IDO_Resultados_MesActual_Calculos4  AS
+    SELECT   
+        B.oSociedadKey,
+        B.oCentroKey,
+        B.oAlmacenKey,
+        B.oProveedorKey,
+        B.oProductoKey,
+        B.oCalendarioKey,
+        CASE WHEN CHAR_LENGTH(CAST (A.InvPrimerDiaMes AS STRING))=0  THEN 0 
+             WHEN CHAR_LENGTH(CAST (A.InvPrimerDiaMes AS STRING))>0 THEN CAST(A.InvPrimerDiaMes AS NUMERIC) END As InvPrimerDiaMes,
+        CASE WHEN CHAR_LENGTH(CAST (A.InvInicial AS STRING))=0  THEN 0 
+             WHEN CHAR_LENGTH(CAST (A.InvInicial AS STRING))>0 THEN CAST(A.InvInicial AS NUMERIC) END As InvInicial,
+        CASE WHEN CHAR_LENGTH(CAST (A.Recibo AS STRING))=0  THEN 0 
+             WHEN CHAR_LENGTH(CAST (A.Recibo AS STRING))>0 THEN A.Recibo END As Recibo,
+        CASE WHEN CHAR_LENGTH(CAST (A.Variaciones_Recibo AS STRING))=0  THEN 0 
+             WHEN CHAR_LENGTH(CAST (A.Variaciones_Recibo AS STRING))>0 THEN A.Variaciones_Recibo END As Variaciones_Recibo,
+        CASE WHEN CHAR_LENGTH(CAST (A.Despachos_Volumen_Neto_VSD60 AS STRING))=0  THEN 0 
+             WHEN CHAR_LENGTH(CAST (A.Despachos_Volumen_Neto_VSD60 AS STRING))>0 THEN A.Despachos_Volumen_Neto_VSD60 END As Despachos_Volumen_Neto_VSD60,
+        CASE WHEN CHAR_LENGTH(CAST (A.Despachos_Volumen_Bruto AS STRING))=0  THEN 0 
+             WHEN CHAR_LENGTH(CAST (A.Despachos_Volumen_Bruto AS STRING))>0 THEN A.Despachos_Volumen_Bruto END As  Despachos_Volumen_Bruto,
+        CASE WHEN CHAR_LENGTH(CAST (A.Expansion_Volumetrica AS STRING))=0  THEN 0 
+             WHEN CHAR_LENGTH(CAST (A.Expansion_Volumetrica AS STRING))>0 THEN A.Expansion_Volumetrica END As Expansion_Volumetrica,
+        CASE WHEN CHAR_LENGTH(CAST (A.Prestamos AS STRING))=0  THEN 0 
+             WHEN CHAR_LENGTH(CAST (A.Prestamos AS STRING))>0 THEN A.Prestamos END As Prestamos,
+        CASE WHEN CHAR_LENGTH(CAST (A.Variacion_de_Almacenamiento AS STRING))=0  THEN 0 
+             WHEN CHAR_LENGTH(CAST (A.Variacion_de_Almacenamiento AS STRING))>0 THEN A.Variacion_de_Almacenamiento END As Variacion_de_Almacenamiento,
+        CASE WHEN CHAR_LENGTH(CAST (A.InvFinal AS STRING))=0  THEN 0 
+             WHEN CHAR_LENGTH(CAST (A.InvFinal AS STRING))>0 THEN CAST(A.InvFinal AS NUMERIC) END As InvFinal
+    FROM IDO_Resultados_MesActual_Calculos3 A
+    FULL OUTER JOIN IDO_FalsosCeros B
+    ON (A.oSociedadKey = B.oSociedadKey AND
+        A.oCentroKey = B.oCentroKey AND
+        A.oAlmacenKey = B.oAlmacenKey AND
+        A.oProveedorKey =  B.oProveedorKey AND
+        A.oProductoKey = B.oProductoKey AND
+        A.oCalendarioKey = B.oCalendarioKey)
+    ORDER BY A.oSociedadKey,  A.oCentroKey,  A.oAlmacenKey,  A.oProveedorKey,  A.oProductoKey,  B.oCalendarioKey;
+
+
+    UPDATE IDO_Resultados_MesActual_Calculos4
+    SET InvPrimerDiaMes=0,
+        InvInicial=0,
+        Recibo=0,
+        Variaciones_Recibo=0,
+        Despachos_Volumen_Neto_VSD60=0,
+        Despachos_Volumen_Bruto=0,
+        Expansion_Volumetrica=0,
+        Prestamos=0,
+        Variacion_de_Almacenamiento=0,
+        InvFinal=0
+    WHERE InvPrimerDiaMes IS NULL AND
+        InvInicial IS NULL AND
+        Recibo IS NULL AND
+        Variaciones_Recibo IS NULL AND
+        Despachos_Volumen_Neto_VSD60 IS NULL AND
+        Despachos_Volumen_Bruto IS NULL AND
+        Expansion_Volumetrica IS NULL AND
+        Prestamos IS NULL AND
+        Variacion_de_Almacenamiento IS NULL AND
+        InvFinal IS NULL;    
+    --FIN PASO 3.3 -> NO A LA TABLA DE MOVIMIENTOS DEL MES ACTUAL LOS FALSOS CEROS PARA DONDE ESTA NO TENGA MOVIMIENTO */
+
+
+
+    /*--PASO 3.4 -> CALCULO EL INVENTARIO FINAL DEL PRIMER DÍA */
+    UPDATE IDO_Resultados_MesActual_Calculos4 
+    SET  InvFinal= (InvInicial  + (Recibo + Variaciones_Recibo + Prestamos + Variacion_de_Almacenamiento) - (Despachos_Volumen_Neto_VSD60))
+    WHERE EXTRACT(DAY FROM oCalendarioKey)=1;
+    /*--FIN PASO 3.4 -> CALCULO EL INVENTARIO FINAL DEL PRIMER DÍA */
+
+
+    -- ordenamos la tabla resultante anterior, solo para visualizacion
+    CREATE OR REPLACE TABLE SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual_Calculos AS 
+    SELECT * 
+    FROM IDO_Resultados_MesActual_Calculos4 
+    ORDER BY oSociedadKey,oCentroKey,oAlmacenKey,oProveedorKey,oProductoKey,oCalendarioKey;
+
+
+
+ ----------- PASO 3.5 -> CREO LA TABLA FINAL TEMP DEL INVENTARIO DEL MES ACTUAL CON ÚNICAMENTE EL PRIMER DÍA --------
+
+    -- Extraemos el mes y el anio de la variable que tiene la fecha del día actual
+    SET MesActual = FORMAT_DATE("%b", vDiaActual_MSEG);
+    SET AnioActual = EXTRACT( YEAR FROM vDiaActual_MSEG);
+
+    -- Variable que va a guardar el string de MesAnio
+    SET temp_table = CONCAT('Inventario_', MesActual,'_', AnioActual);
+
+  /*
+    Aqui vamos a crear la tabla temporal dinámica de acuerdo a cada mes de cada año procesado. Lo anterior a partir de la ejecucion de
+    EXECUTE IMMEDIATE
+
+    LA CONSULTA REALIZADA ES LA SIGUIENTE:
+
+    CREATE OR REPLACE TEMP TABLE temp_table AS 
+    SELECT * 
+    FROM SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual_Calculos 
+    WHERE EXTRACT(DAY FROM oCalendarioKey)=1";
+
+  */
+    SET Dynamic_query = "CREATE OR REPLACE TEMP TABLE " || temp_table || " AS SELECT * FROM SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual_Calculos WHERE EXTRACT(DAY FROM oCalendarioKey)=1";
+    EXECUTE IMMEDIATE Dynamic_query;
+    
+
+
+    /*--PASO 3.6 -> SOBRE LA TABLA FINAL TEMP DEL INVENTARIO DEL MES ACTUAL RELIZO EL CALCULO DEL DÍA ARRASTRANDO EL RESULTADO 
+                    DEL FINAL PARA EL INICIAL DEL SIGUIENTE DÍA MEDIANTE INSERT INTO */
+    WHILE vFechaIni < vDiaActual_MSEG DO
+    
+    /* Se colocan de esta manera estas variables ya que en EXECUTE IMMEDIATE manipulará cualquier valor dinámico sin las comillas, 
+       naturales. Es decir, si se tiene  una variable DATE, al compararse con un campo DATE dentro de un execute immediate, el código
+       leerá, por ejemplo en un filtro, WHERE oCalendarioKey = 2020-01-01 y no WHERE oCalendarioKey = '2020-01-01'. Por lo que
+       arrojará un error de tipo 'No hay match en el operador = entre DATE, INT64'
+    */
+        SET vFloorMaxDateLast = CONCAT('"',CAST(vFechaIni AS STRING),'"');
+        SET vFloorMaxDateNext = CONCAT('"',CAST(vFechaIni+1 AS STRING),'"'); 
+
+        SET Dynamic_query = 'INSERT INTO ' || temp_table || ' SELECT B.oSociedadKey,B.oCentroKey, B.oAlmacenKey,B.oProveedorKey,B.oProductoKey, B.oCalendarioKey, A.InvPrimerDiaMes, (A.InvInicial + (A.Recibo + A.Variaciones_Recibo + A.Prestamos + A.Variacion_de_Almacenamiento) - (A.Despachos_Volumen_Neto_VSD60) ) AS InvInicial, B.Recibo, B.Variaciones_Recibo, B.Despachos_Volumen_Neto_VSD60, B.Despachos_Volumen_Bruto,B.Expansion_Volumetrica,B.Prestamos,B.Variacion_de_Almacenamiento,(A.InvInicial + (A.Recibo + A.Variaciones_Recibo + A.Prestamos + A.Variacion_de_Almacenamiento) - (A.Despachos_Volumen_Neto_VSD60)) + (B.Recibo + B.Variaciones_Recibo + B.Prestamos + B.Variacion_de_Almacenamiento) - (B.Despachos_Volumen_Neto_VSD60) as InvFinal FROM ' || temp_table || ' A JOIN SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual_Calculos As B ON (A.oSociedadKey = B.oSociedadKey AND A.oCentroKey = B.oCentroKey AND A.oAlmacenKey = B.oAlmacenKey AND A.oProveedorKey =  B.oProveedorKey AND A.oProductoKey = B.oProductoKey ) WHERE CAST(A.oCalendarioKey As STRING) = ' || vFloorMaxDateLast || ' AND CAST(B.oCalendarioKey As STRING) =  ' || vFloorMaxDateNext || ' ORDER BY B.oSociedadKey,B.oCentroKey,B.oAlmacenKey,B.oProveedorKey,B.oProductoKey,B.oCalendarioKey';
+        EXECUTE IMMEDIATE Dynamic_query;
+
+        /*
+        LA QUERY DE EXECUTE IMMEDIATE REALIZADA ARRIBA EN Dynamic_query ES LA SIGUIENTE: 
+
+        SELECT
+        B.oSociedadKey,
+        B.oCentroKey,
+        B.oAlmacenKey,
+        B.oProveedorKey,
+        B.oProductoKey,
+        B.oCalendarioKey,
+        A.InvPrimerDiaMes,
+        (A.InvInicial + (A.Recibo + A.Variaciones_Recibo + A.Prestamos + A.Variacion_de_Almacenamiento) - (A.Despachos_Volumen_Neto_VSD60) ) AS InvInicial,
+        B.Recibo,
+        B.Variaciones_Recibo,
+        B.Despachos_Volumen_Neto_VSD60,
+        B.Despachos_Volumen_Bruto,
+        B.Expansion_Volumetrica,
+        B.Prestamos,
+        B.Variacion_de_Almacenamiento,
+        (A.InvInicial + (A.Recibo + A.Variaciones_Recibo + A.Prestamos + A.Variacion_de_Almacenamiento) - (A.Despachos_Volumen_Neto_VSD60)) + (B.Recibo + B.Variaciones_Recibo + B.Prestamos + B.Variacion_de_Almacenamiento) - (B.Despachos_Volumen_Neto_VSD60) as InvFinal
+    FROM temp_table A
+    INNER JOIN SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual_Calculos B
+    ON (
+            A.oSociedadKey = B.oSociedadKey AND
+            A.oCentroKey = B.oCentroKey AND
+            A.oAlmacenKey = B.oAlmacenKey AND',
+            A.oProveedorKey =  B.oProveedorKey AND
+            A.oProductoKey = B.oProductoKey )
+
+    WHERE A.oCalendarioKey = vFloorMaxDateLast
+        AND B.oCalendarioKey = vFloorMaxDateNext
+    ORDER BY
+        B.oSociedadKey,
+        B.oCentroKey,
+        B.oAlmacenKey,
+        B.oProveedorKey,
+        B.oProductoKey,
+        B.oCalendarioKey;
+        */
+            
+        SET vFechaIni = vFechaIni+1;
+        SET vFechaActual = vFechaIni;
+
+    END WHILE;
+
+    
+ 
+
+    /*--PASO 3.6.1 -> CREO LA TABLA FINAL DEL INVENTARIO DEL MES ACTUAL CON LOS NUEVOS CAMPOS REQUERIDOS EN CAPA GRAFICA */
+
+    SET Dynamic_query = 'CREATE OR REPLACE TABLE SAP_resultados_VP_Operac_Logist_Invent.IDO_Inventario_MesActual AS SELECT *,SAFE_DIVIDE(Variacion_de_Almacenamiento,Despachos_Volumen_Neto_VSD60) As FLA_Salidas,SAFE_DIVIDE(Variaciones_Recibo,Recibo) As FLR_Entradas,SAFE_DIVIDE(Despachos_Volumen_Bruto,Despachos_Volumen_Neto_VSD60) As GOV_GSV,Variacion_de_Almacenamiento + Variaciones_Recibo As Totales,SAFE_DIVIDE((Variacion_de_Almacenamiento + Variaciones_Recibo),Despachos_Volumen_Neto_VSD60) As Totales_Salidas FROM ' ||
+                        temp_table || ' ORDER BY oSociedadKey,oCentroKey,oAlmacenKey,oProveedorKey,oProductoKey,oCalendarioKey';
+    EXECUTE IMMEDIATE Dynamic_query;
+
+        /*
+      LA QUERY DE EXECUTE IMMEDIATE REALIZADA ARRIBA EN Dynamic_query ES LA SIGUIENTE: 
+
+      CREATE OR REPLACE TABLE SAP_resultados_VP_Operac_Logist_Invent.IDO_Inventario_MesActual AS 
+      SELECT *,
+        SAFE_DIVIDE(Variacion_de_Almacenamiento,Despachos_Volumen_Neto_VSD60) As FLA_Salidas,
+        SAFE_DIVIDE(Variaciones_Recibo,Recibo) As FLR_Entradas,
+        SAFE_DIVIDE(Despachos_Volumen_Bruto,Despachos_Volumen_Neto_VSD60) As GOV_GSV,
+        Variacion_de_Almacenamiento + Variaciones_Recibo As Totales,
+        SAFE_DIVIDE((Variacion_de_Almacenamiento + Variaciones_Recibo),Despachos_Volumen_Neto_VSD60) As Totales_Salidas
+      FROM  temp_table
+      ORDER BY oSociedadKey,oCentroKey,oAlmacenKey,oProveedorKey,oProductoKey,oCalendarioKey;
+        */
+
+ 
+ 
+  -- BORRAR LA TABLA TEMPORAL DESPUES DEL BUCLE SERVIRÁ?
+    SET Dynamic_query = 'DROP TABLE IF EXISTS ' || temp_table;
+    EXECUTE IMMEDIATE Dynamic_query;
+
+
+   /* PASO 3.7: CUANDO YA ES EL MOMENTO DEL CIERRE (FIN DE MES) SE ALMACENA EL RESULTADO DEL ÚLTIMO DÍA SOBRE EL CIERRE 
+                MENSUAL HISTORICO.
+
+                Aqui se toma la tabla IDO_Inventario_MesActual completa, y se le hace left join a ella misma pero con
+                solamente la data del ultimo día del mes. La tabla resultante que se debe insertar en CierreMensual es 
+                MesActual compactada por las distintas combinaciones excepto la fecha, para que queden los totales de los
+                movimientos. Además de esto, de MesActual del ultimo dia del mes extraemos la fecha y el InvFinal, de manera
+                que la resultante tendrá: la fecha del ultimo día del mes; el InvInicial con el que arrancó el mes; el InvFinal
+                con el que acaba el mes y el total acumulado de movimientos durante todo el mes.
+                    
+   */
+
+   /*  Si es TIPO = 1, quiere decir que el usuario tiene HASTA el 11 de cada mes para modificar información del mes ANTERIOR a la
+       FECHA ACTUAL. En el proceso a continuacion se ACTUALIZA la información del ultimo día registrado en CierreMensual con lo
+       que se procesó durante el script, siempre y cuando se cumpla con la condicion vFechaActual = vUltimoDiaMes_IDO. Esto sería 
+       posible solamente hasta el ultimo día de cada mes. 
+       
+       Posteriormente, si TIPO = 2 es porque solamente estamos procesando info del mes actual hasta que vFechaActual = vUltimoDiaMes_IDO se cumpla, entonces se 
+       INSERTA.
+   */
+    IF TIPO_CONSULTA = 1 THEN
+       IF vFechaActual = vUltimoDiaMes_IDO THEN 
+
+          DELETE terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual
+          WHERE oCalendarioKey = vUltimoDiaMes_IDO;
+
+          INSERT INTO `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual`
+                  SELECT 
+                          A.oSociedadKey,
+                          A.oCentroKey,
+                          A.oAlmacenKey,
+                          A.oProveedorKey,
+                          A.oProductoKey,
+                          B.oCalendarioKey,
+                          A.InvPrimerDiaMes,
+                          A.InvPrimerDiaMes As InvIni,
+                          SUM(A.Recibo) As Recibo,
+                          SUM(A.Variaciones_Recibo) As Variaciones_Recibo,
+                          SUM(A.Despachos_Volumen_Neto_VSD60) As Despachos_Volumen_Neto_VSD60,
+                          SUM(A.Despachos_Volumen_Bruto) As Despachos_Volumen_Bruto,
+                          SUM(A.Expansion_Volumetrica) As Expansion_Volumetrica,
+                          SUM(A.Prestamos) As Prestamos,
+                          SUM(A.Variacion_de_Almacenamiento) As Variacion_de_Almacenamiento,
+                          B.InvFinal,
+                          SAFE_DIVIDE(SUM(A.Variacion_de_Almacenamiento), SUM(A.Despachos_Volumen_Neto_VSD60)) As FLA_Salidas,
+                          SAFE_DIVIDE(SUM(A.Variaciones_Recibo), SUM(A.Recibo)) As FLR_Entradas,
+                          SAFE_DIVIDE(SUM(A.Despachos_Volumen_Bruto), SUM(A.Despachos_Volumen_Neto_VSD60)) As GOV_GSV,
+                          SUM(A.Variacion_de_Almacenamiento) + SUM(A.Variaciones_Recibo) As Totales,
+                          SAFE_DIVIDE((SUM(A.Variacion_de_Almacenamiento) + SUM(A.Variaciones_Recibo)), SUM(A.Despachos_Volumen_Neto_VSD60)) As Totales_Salidas       
+
+                        FROM `SAP_resultados_VP_Operac_Logist_Invent.IDO_Inventario_MesActual` A 
+                        LEFT JOIN   `SAP_resultados_VP_Operac_Logist_Invent.IDO_Inventario_MesActual` B
+                        ON (
+                              A.oSociedadKey = B.oSociedadKey AND
+                              A.oCentroKey = B.oCentroKey AND
+                              A.oAlmacenKey = B.oAlmacenKey AND
+                              A.oProveedorKey =  B.oProveedorKey AND
+                              A.oProductoKey = B.oProductoKey 
+                          )
+                        WHERE  
+                            B.oCalendarioKey  = vUltimoDiaMes_IDO 
+                        GROUP BY  
+                          A.oSociedadKey,
+                          A.oCentroKey,
+                          A.oAlmacenKey,
+                          A.oProveedorKey,
+                          A.oProductoKey,
+                          B.oCalendarioKey,
+                          A.InvPrimerDiaMes,
+                          B.InvFinal
+                        ORDER BY 
+                          A.oSociedadKey,
+                          A.oCentroKey,
+                          A.oAlmacenKey,
+                          A.oProveedorKey,
+                          A.oProductoKey
+                        ;   
+       /*
+          UPDATE terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual I
+          SET 
+              I.oSociedadKey = U.oSociedadKey,
+              I.oCentroKey = U.oCentroKey,
+              I.oAlmacenKey = U.oAlmacenKey,
+              I.oProveedorKey = U.oProveedorKey,
+              I.oProductoKey = U.oProductoKey,
+              I.oCalendarioKey =U.oCalendarioKey,
+              I.InvPrimerDiaMes = U.InvPrimerDiaMes,
+              I.InvIni = U.InvIni,
+              I.Recibo = U.Recibo,
+              I.Variaciones_Recibo = U.Variaciones_Recibo,
+              I.Despachos_Volumen_Neto_VSD60 = U.Despachos_Volumen_Neto_VSD60,
+              I.Despachos_Volumen_Bruto = U.Despachos_Volumen_Bruto,
+              I.Expansion_Volumetrica = U.Expansion_Volumetrica,
+              I.Prestamos = U.Prestamos,
+              I.Variacion_de_Almacenamiento = U.Variacion_de_Almacenamiento,
+              I.InvFinal = U.InvFinal
+      FROM(
+      SELECT 
+                                A.oSociedadKey,
+                                A.oCentroKey,
+                                A.oAlmacenKey,
+                                A.oProveedorKey,
+                                A.oProductoKey,
+                                B.oCalendarioKey,
+                                A.InvPrimerDiaMes,
+                                A.InvPrimerDiaMes As InvIni,
+                                SUM(A.Recibo) As Recibo,
+                                SUM(A.Variaciones_Recibo) As Variaciones_Recibo,
+                                SUM(A.Despachos_Volumen_Neto_VSD60) As Despachos_Volumen_Neto_VSD60,
+                                SUM(A.Despachos_Volumen_Bruto) As Despachos_Volumen_Bruto,
+                                SUM(A.Expansion_Volumetrica) As Expansion_Volumetrica,
+                                SUM(A.Prestamos) As Prestamos,
+                                SUM(A.Variacion_de_Almacenamiento) As Variacion_de_Almacenamiento,
+                                B.InvFinal,
+                                SAFE_DIVIDE(SUM(A.Variacion_de_Almacenamiento), SUM(A.Despachos_Volumen_Neto_VSD60)) As FLA_Salidas,
+                                SAFE_DIVIDE(SUM(A.Variaciones_Recibo), SUM(A.Recibo)) As FLR_Entradas,
+                                SAFE_DIVIDE(SUM(A.Despachos_Volumen_Bruto), SUM(A.Despachos_Volumen_Neto_VSD60)) As GOV_GSV,
+                                SUM(A.Variacion_de_Almacenamiento) + SUM(A.Variaciones_Recibo) As Totales,
+                                SAFE_DIVIDE((SUM(A.Variacion_de_Almacenamiento) + SUM(A.Variaciones_Recibo)), SUM(A.Despachos_Volumen_Neto_VSD60)) As Totales_Salidas  
+                                
+                              FROM `SAP_resultados_VP_Operac_Logist_Invent.IDO_Inventario_MesActual` A 
+                              LEFT JOIN   `SAP_resultados_VP_Operac_Logist_Invent.IDO_Inventario_MesActual` B
+                              ON (
+                                    A.oSociedadKey = B.oSociedadKey AND
+                                    A.oCentroKey = B.oCentroKey AND
+                                    A.oAlmacenKey = B.oAlmacenKey AND
+                                    A.oProveedorKey =  B.oProveedorKey AND
+                                    A.oProductoKey = B.oProductoKey 
+                                )
+                              WHERE  
+                                  B.oCalendarioKey  = vUltimoDiaMes_IDO 
+                              GROUP BY 
+                                A.oSociedadKey,
+                                A.oCentroKey,
+                                A.oAlmacenKey,
+                                A.oProveedorKey,
+                                A.oProductoKey,
+                                B.oCalendarioKey,
+                                A.InvPrimerDiaMes,
+                                B.InvFinal
+                              ORDER BY 
+                                A.oSociedadKey,
+                                A.oCentroKey,
+                                A.oAlmacenKey,
+                                A.oProveedorKey,
+                                A.oProductoKey
+                              ) U
+      WHERE  I.oCalendarioKey = vUltimoDiaMes_IDO; */
+      END IF;
+    END IF;
+
+
+    IF  TIPO_CONSULTA = 2 THEN  
+    --SET vFechaActual = LAST_DAY(vPrimerDiaMes_IDO, MONTH);
+          IF vFechaActual = vUltimoDiaMes_IDO THEN
+            INSERT INTO `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual`
+                  SELECT 
+                          A.oSociedadKey,
+                          A.oCentroKey,
+                          A.oAlmacenKey,
+                          A.oProveedorKey,
+                          A.oProductoKey,
+                          B.oCalendarioKey,
+                          A.InvPrimerDiaMes,
+                          A.InvPrimerDiaMes As InvIni,
+                          SUM(A.Recibo) As Recibo,
+                          SUM(A.Variaciones_Recibo) As Variaciones_Recibo,
+                          SUM(A.Despachos_Volumen_Neto_VSD60) As Despachos_Volumen_Neto_VSD60,
+                          SUM(A.Despachos_Volumen_Bruto) As Despachos_Volumen_Bruto,
+                          SUM(A.Expansion_Volumetrica) As Expansion_Volumetrica,
+                          SUM(A.Prestamos) As Prestamos,
+                          SUM(A.Variacion_de_Almacenamiento) As Variacion_de_Almacenamiento,
+                          B.InvFinal,
+                          SAFE_DIVIDE(SUM(A.Variacion_de_Almacenamiento), SUM(A.Despachos_Volumen_Neto_VSD60)) As FLA_Salidas,
+                          SAFE_DIVIDE(SUM(A.Variaciones_Recibo), SUM(A.Recibo)) As FLR_Entradas,
+                          SAFE_DIVIDE(SUM(A.Despachos_Volumen_Bruto), SUM(A.Despachos_Volumen_Neto_VSD60)) As GOV_GSV,
+                          SUM(A.Variacion_de_Almacenamiento) + SUM(A.Variaciones_Recibo) As Totales,
+                          SAFE_DIVIDE((SUM(A.Variacion_de_Almacenamiento) + SUM(A.Variaciones_Recibo)), SUM(A.Despachos_Volumen_Neto_VSD60)) As Totales_Salidas       
+
+                        FROM `SAP_resultados_VP_Operac_Logist_Invent.IDO_Inventario_MesActual` A 
+                        LEFT JOIN   `SAP_resultados_VP_Operac_Logist_Invent.IDO_Inventario_MesActual` B
+                        ON (
+                              A.oSociedadKey = B.oSociedadKey AND
+                              A.oCentroKey = B.oCentroKey AND
+                              A.oAlmacenKey = B.oAlmacenKey AND
+                              A.oProveedorKey =  B.oProveedorKey AND
+                              A.oProductoKey = B.oProductoKey 
+                          )
+                        WHERE  
+                            B.oCalendarioKey  = vUltimoDiaMes_IDO 
+                        GROUP BY 
+                          A.oSociedadKey,
+                          A.oCentroKey,
+                          A.oAlmacenKey,
+                          A.oProveedorKey,
+                          A.oProductoKey,
+                          B.oCalendarioKey,
+                          A.InvPrimerDiaMes,
+                          B.InvFinal
+                        ORDER BY 
+                          A.oSociedadKey,
+                          A.oCentroKey,
+                          A.oAlmacenKey,
+                          A.oProveedorKey,
+                          A.oProductoKey
+                        ; 
+                
+          END IF ;
+    END IF; 
+
+
+    /*--FIN PASO 3.7 -> CUANDO YA ES EL MOMENTO DEL CIERRE (FIN DE MES) SE ALMACENA EL RESULTADO DEL ÚLTIMO DÍA SOBRE EL CIERRE MENSUAL */
+
+END;
+
+
+
+
+
+------------------------------------------------- SP DE EJECUCION -------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.SP_IDOTocancipa_Ejecucion` ()
+BEGIN
+
+---------------------------------------  PROCESO INVENTARIO IDO TOCANCIPA  ----------------------------------
+ /*
+    Este proceso calcula el inventario IDO TOCANCIPA mediante la acumulación de valores, este parte siempre del cierre 
+    mensual y carga los movimientos del mes siguiente (MES ACTUAL) para realizar los calculos, luego de esto al cierre 
+    de mes almacena el resultado en cierre mensual
+
+    Desde el día primero de cada mes hasta el día seleccionado en la variable día fin, realiza los calculos del mes actual 
+    y mes anterior, despúes de esto solo los realizará para el mes actual 
+
+    Estos calculos los realiza mediante el llamado del procedimiento almacenado:     
+        terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.SP_IDO_Tocancipa_Fact    
+  */
+
+
+
+-------------------------------------  PASO 1 - DECLARACIÓN DE VARIABLES  ----------------------------------------------
+   
+-- Variable creada para saber la fecha en que se ejecuta el procedimiento
+DECLARE vFechaEjecucion DATE DEFAULT (SELECT CURRENT_DATE('UTC-5') AS the_date);
+
+-- Variable fecha que determinará el ultimo mes almacenado en el histórico IDO_CierreMensual
+DECLARE vUltimoDia_CierreMensual DATE DEFAULT (SELECT CAST(Max(oCalendarioKey) AS DATE) AS  oCalendarioKey  
+                                                FROM `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual`); 
+
+-- Variable fecha que determinará el ultimo mes almacenado en el histórico IDO_CierreMensual. Es la misma fecha actual
+--DECLARE vUltimoDia_Ciclo DATE DEFAULT '2021-05-30';
+DECLARE vUltimoDia_Ciclo DATE DEFAULT (SELECT CAST(Max(Fe_contabilizacion) AS DATE) AS  oCalendarioKey  
+                                       FROM `terpel-gtic-datalake.SAP_datarefinada.MSEG`); 
+
+-- Variable fecha que determinará el ultimo día del mes ANTERIOR a la fecha de ejecución
+DECLARE vUltimoDia_MesAnterior_Ciclo DATE DEFAULT LAST_DAY(DATE_SUB(vUltimoDia_Ciclo, INTERVAL 1 MONTH), MONTH);
+
+-- Variables que harán la validacion de loops infinitos
+DECLARE vFechaCierreMensual_rep DATE DEFAULT  CURRENT_DATE ('UTC-5');
+DECLARE vInfiniteLoop BOOL DEFAULT FALSE;
+DECLARE vErrorMessage STRING DEFAULT '';
+
+
+
+--------------------------------------------  PASO 2 - EJECUCION  ------------------------------------------------
+/* 
+El proceso consta de dos condicionales. El primero se encargará de procesar el histórico, si no ha sido procesado, hasta el ultimo día del mes 
+ANTERIOR al día actual:
+
+*/
+IF(vUltimoDia_CierreMensual < vUltimoDia_MesAnterior_Ciclo) THEN
+
+  WHILE vUltimoDia_CierreMensual < vUltimoDia_MesAnterior_Ciclo DO
+
+    CALL `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.SP_IDOTocancipa_Fact` (2);
+    --DROP TABLE IF EXISTS temp_table;
+
+    SET vFechaCierreMensual_rep = (SELECT CAST(Max(oCalendarioKey) AS DATE) AS  oCalendarioKey  
+                                    FROM `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual`);
+    
+    IF(vFechaCierreMensual_rep = vUltimoDia_CierreMensual) THEN
+      SET vInfiniteLoop = TRUE;
+      SET vErrorMessage = CONCAT('ERROR: No hay suficientes datos para: ',
+                    FORMAT_DATE('%b', vFechaCierreMensual_rep +1),' ',
+                    EXTRACT(YEAR FROM vFechaCierreMensual_rep+1), '. Se detiene el proceso.' );
+      BREAK;
+    END IF;
+
+    SET vUltimoDia_CierreMensual = (SELECT CAST(Max(oCalendarioKey) AS DATE) AS  oCalendarioKey  
+                                    FROM `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual`);
+  END WHILE;
+
+END IF;
+
+
+-- Validamos si hubo problemas con la ingesta de data y no se pudo cerrar el ciclo
+IF(vInfiniteLoop = TRUE) THEN
+  SELECT vErrorMessage;
+END IF;
+
+
+/* 
+El segundo se encargará de los deltas.
+
+*/
+IF vInfiniteLoop = FALSE AND EXTRACT(DAY FROM vFechaEjecucion)< 11  THEN
+
+    CALL `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.SP_IDOTocancipa_Fact` (1);
+    --DROP TABLE IF EXISTS temp_table;
+
+    CALL `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.SP_IDOTocancipa_Fact` (2);
+    --DROP TABLE IF EXISTS temp_table;
+
+ELSE
+    CALL `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.SP_IDOTocancipa_Fact` (2);
+    --DROP TABLE IF EXISTS temp_table;
+
+END IF; 
+
+
+--Reordenamos la tabla resultante IDO_CierreMensual
+CREATE OR REPLACE TABLE SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual As 
+SELECT 
+  A.oSociedadKey,
+  A.oCentroKey,
+  A.oAlmacenKey,
+  /*CASE oProveedorKey
+    WHEN '610617' THEN '616841'
+    WHEN '513773' THEN '616841'
+    ELSE oProveedorKey  
+  END as oProveedorKey,*/
+  IFNULL(CAST(B.Codigo_Nuevo as STRING),A.oProveedorKey) as oProveedorKey, 
+  A.* EXCEPT (oSociedadKey,oCentroKey,oAlmacenKey,oProveedorKey)
+  --IFNULL(B.Codigo Nuevo,oProveedorKey)  as oProveedorKey
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual`  A
+LEFT JOIN SAP_archivos_maestros_datarefinada.IDO_Tocancipa_Maestro_NewCodSAP_Mayoristas B
+ON A.oProveedorKey = CAST(B.Codigo_Antiguo as STRING)
+ORDER BY  oSociedadKey,oCentroKey,oAlmacenKey,oProveedorKey,oProductoKey,oCalendarioKey;
+
+
+/* 
+Optimizacion.
+
+*/
+DROP TABLE IF EXISTS `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual_Calculos`;
+--DROP TABLE IF EXISTS `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual`;
+
+
+
+/* 
+SELECT * FROM `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual` 
+WHERE oSociedadKey ='1000' And oCentroKey = '1P73' And oAlmacenKey ='T009'And oProveedorKey = '300015' And oProductoKey = '1101' 
+ORDER BY oSociedadKey,oCentroKey,oAlmacenKey,oProveedorKey,oProductoKey,oCalendarioKey
+
+
+SELECT DISTINCT oCalendarioKey 
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual`
+order by oCalendarioKey desc 
+
+
+SELECT *--MAX(Fe_contabilizacion)
+FROM `terpel-gtic-datalake.SAP_datarefinada.MSEG`
+where Fe_contabilizacion = '2021-11-29'
+
+
+SELECT *  
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual` 
+WHERE EXTRACT(YEAR FROM oCalendarioKey) = 2021
+  AND
+  EXTRACT(MONTH FROM oCalendarioKey) = 11
+ORDER BY  oSociedadKey,oCentroKey,oAlmacenKey,oProveedorKey,oProductoKey,oCalendarioKey;
+
+
+--------------------------------------------------------------------------------------------
+--------------------------- VALIDAR NUMERO DE REGISTROS EN MSEG ----------------------------
+--------------------------------------------------------------------------------------------
+
+SELECT  oCalendarioKey, COUNT(oCalendarioKey) As counts
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_Resultados_MesActual` 
+GROUP BY oCalendarioKey
+ORDER BY oCalendarioKey;
+
+
+SELECT  Fe_contabilizacion, COUNT(Fe_contabilizacion) As counts
+FROM `terpel-gtic-datalake.SAP_datarefinada.MSEG`
+WHERE Fe_contabilizacion BETWEEN '2021-10-01' AND '2021-12-31'
+GROUP BY Fe_contabilizacion
+ORDER BY Fe_contabilizacion;
+
+
+
+
+
+
+
+
+--------------------- CORRER UNICAMENTE PARA REINICIAR EL HISTORICO ----------------
+
+DELETE FROM SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual 
+WHERE EXTRACT(YEAR FROM oCalendarioKey) = 2021
+AND
+EXTRACT(MONTH FROM oCalendarioKey) = 12
+*/
+
+END

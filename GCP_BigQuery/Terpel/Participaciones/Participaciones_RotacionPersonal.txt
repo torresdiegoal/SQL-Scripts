@@ -1,0 +1,107 @@
+  
+  DECLARE vCodigoUnico STRING DEFAULT 'EDS3116' ;
+
+
+  --CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_RotacionPersonal As
+  --CREATE OR REPLACE TEMP TABLE NumIsleros As
+  WITH condiciones_NumIsleros As (
+    SELECT DISTINCT
+      * --EXCEPT (Mes_liquidacion)
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla = 'Empleados'
+    ORDER BY Mes_liquidacion,  Rango_Inicial, Rango_Final ),
+    
+    numIsleros As (
+    SELECT 
+      oCodigoUnico, 
+      Anio_Vigencia,
+      oCalendarioKey, 
+      Segmento_condicion, 
+      IFNULL(Isleros, 0) as NumIsleros
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp A
+    WHERE oCodigoUnico = vCodigoUnico ),
+
+    numIsleros2 As (
+    SELECT 
+      A.*,
+      Regla,
+      CAST(Rango_Inicial AS INT64 ) As Rango_Inicial,	
+      CAST(Rango_Final AS INT64) As Rango_Final,	
+      Valor
+    FROM numIsleros A
+    LEFT JOIN condiciones_NumIsleros B 
+      ON ( A.oCalendarioKey = B.Mes_liquidacion )),
+
+    liquidacion_NumIsleros As (
+    SELECT 
+      *
+    FROM numIsleros2 
+    WHERE NumIsleros BETWEEN Rango_Inicial AND Rango_Final
+    ORDER BY oCodigoUnico, oCalendarioKey, Rango_Inicial, Rango_Final),
+
+  --CREATE OR REPLACE TEMP TABLE Liquidacion_Retiros As
+    participaciones_NumIsleros As (
+    SELECT 
+      oCodigoUnico,
+      Anio_Vigencia, 
+      oCalendarioKey, 
+      Valor As Regla,
+      Regla As Regla_Islero, 
+      Segmento_condicion, 
+      NumIsleros,
+      Rango_Inicial As Rango_Inicial_Isleros, 
+      Rango_Final  As Rango_Final_Isleros
+    FROM liquidacion_NumIsleros
+    --FROM Liquidacion_NumIsleros
+    ),
+    
+    Retiros1 As (
+    SELECT 
+      oCodigoUnico,
+      Anio_Vigencia,
+      oCalendarioKey, 
+      Segmento_condicion, 
+      IFNULL(Retiros, 0) as NumRetiros
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp A   ) ,
+
+    Retiros2 As (
+    SELECT 
+      A.*,
+      B.NumIsleros,
+      B.Rango_Inicial_Isleros,	
+      B.Rango_Final_Isleros,
+      B.Regla_Islero,
+      B.Regla
+    FROM Retiros1 A
+    LEFT JOIN participaciones_NumIsleros B 
+      ON(A.oCodigoUnico = B.oCodigoUnico AND
+        A.oCalendarioKey = B.oCalendarioKey AND
+        A.Segmento_condicion = B.Segmento_condicion ) 
+    WHERE A.oCodigoUnico = vCodigoUnico )  ,
+
+    condiciones_Retiros As (
+    SELECT DISTINCT
+      * --EXCEPT (Mes_liquidacion)
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla LIKE 'Retiro_'
+    ORDER BY Mes_liquidacion,  Rango_Inicial, Rango_Final ),
+
+    Retiros3 As (
+    SELECT 
+      A.* EXCEPT(NumRetiros),
+      A.NumRetiros,
+      CAST(B.Rango_Inicial AS INT64 ) As Rango_Inicial,	
+      CAST(B.Rango_Final AS INT64) As Rango_Final,	
+      CAST(B.Valor As NUMERIC) As Pesos_Galon_Rotacion
+    FROM Retiros2 A
+    LEFT JOIN condiciones_Retiros B
+      ON( A.oCalendarioKey = B.Mes_liquidacion AND 
+          A.Regla = B.Regla  )
+    --WHERE NumRetiros BETWEEN Rango_Inicial AND Rango_Final
+    ORDER BY Anio_Vigencia,  Rango_Inicial_Isleros, Rango_Final_Isleros)
+
+  SELECT  
+    *
+  FROM Retiros3 
+  WHERE NumRetiros BETWEEN Rango_Inicial AND Rango_Final
+  ORDER BY oCodigoUnico, oCalendarioKey,  Rango_Inicial;

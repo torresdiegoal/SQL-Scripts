@@ -1,0 +1,2449 @@
+/* 
+-- PRUEBAS UNITARIAS
+    SELECT * 
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion` 
+    WHERE oCodigoUnico = 'EDS3471'
+      AND oCalendarioKey = '2022-03-01'
+    -- 3468 con dif en mes venc volVenta
+
+
+  // GENERAR CIFRAS 
+    SELECT * 
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidaciones` 
+    WHERE oCalendarioKey BETWEEN '2022-01-01'
+      AND '2022-04-01'
+    ORDER BY  oCodigoUnico,oCalendarioKey
+    */
+
+
+CREATE OR REPLACE PROCEDURE SAP_resultados_VP_Comercial_Combustibles.SP_Participaciones()
+BEGIN
+
+
+----------------------------------------------------------------------------------------------------------------
+ ------------------------------------ PARTE I: TRANSFORMADO PARTICIPACIONES ------------------------------------------
+----------------------------------------------------------------------------------------------------------------
+
+
+/*
+  DECLARACION DE VARIABLES
+   
+*/
+-- Dia de hoy
+DECLARE vFechaEjecucion DATE DEFAULT (SELECT CURRENT_DATE('UTC-5'));
+
+-- DECLARE vFechaDeltaEjecucion DATE DEFAULT (SELECT CURRENT_DATE('UTC-5'));
+
+
+-- Variable fecha que determinará el ultimo mes almacenado en el histórico de Participaciones_Liquidaciones
+DECLARE vUltimoDia_Liquidaciones DATE DEFAULT (SELECT CAST(Max(oCalendarioKey) AS DATE) AS  oCalendarioKey  
+                                                FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidaciones`);
+/*
+  IMPORTANTE!!
+  Si se busca correr desde un mes en especifico, comentar arriba, descomentar abajo
+  y buscar la palabra 'ControlDeltas'
+  
+*/
+--DECLARE vUltimoDia_Liquidaciones DATE DEFAULT '2021-12-01';
+
+
+-- Fecha del primer dia del mes a liquidar
+DECLARE vFechaRecarga DATE DEFAULT LAST_DAY(vUltimoDia_Liquidaciones, MONTH) + 1;
+
+-- Primer dia del mes actual
+DECLARE vFechaEjecucionTrunc DATE DEFAULT DATE_TRUNC(vFechaEjecucion, MONTH);
+
+
+-- Variables que almacenarán los totales de perdida y participacion terpel inicial total
+DECLARE perdidadAsumidaTerpel NUMERIC DEFAULT 0.0;
+DECLARE partTerpelInicialTotal NUMERIC DEFAULT 0.0;
+
+
+
+
+/*
+  TABLA CALENDARIO PARTICIPACIONES
+
+  Maestros generados
+      SAP_resultados.Calendario
+      SAP_resultados.Calendario_Mes
+   
+*/
+
+
+/*
+  TABLA MAESTRO HISTORICO SEGMENTOS Y CEBE
+
+  Maestros Excel
+      Franquicias_Participaciones_Maestro_historico_segmentos_EDS_Maestro
+   
+*/
+
+
+
+/*
+  TABLA HISTORICO SEGMENTOS
+   
+*/
+CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos As
+--CREATE OR REPLACE TEMP TABLE Participaciones_tmpHistoricoSegmentos As 
+WITH Participaciones_CalendarioParticipaciones As (
+  SELECT DISTINCT
+    Fecha As oCalendarioKey,
+    year As Anio,
+    A.Month As Mes,
+    CONCAT(B.Month_short, '-',year) As MonthYear,
+  FROM `terpel-gtic-datalake.SAP_resultados.Calendario` A
+  LEFT JOIN `terpel-gtic-datalake.SAP_resultados.Calendario_Mes` B
+    ON(A.Month = B.MesNum)
+  WHERE --year BETWEEN EXTRACT(YEAR FROM vUltimoDia_Liquidaciones) AND EXTRACT(YEAR FROM vFechaEjecucion)
+    Fecha BETWEEN vUltimoDia_Liquidaciones AND LAST_DAY (vFechaEjecucion, MONTH)
+  ORDER BY oCalendarioKey),
+  
+
+  Participaciones_MaestroHistoricoSegmentos As (
+  SELECT 
+    CONCAT(ROW_NUMBER() OVER(ORDER BY Cod_Unico), '|', 'Historico') As Key_Tabla_MaestroHistoricoSegmentos,
+    Cod_Unico As CodigoUnico,
+    --UPPER(Segmento) As Segmento_historico_maestro,
+    CASE WHEN UPPER(Segmento) LIKE '%FRANQ%' THEN 'FRANQUICIADAS'
+        WHEN REGEXP_CONTAINS(UPPER(Segmento),'(OPESE|MASSER)')  THEN 'MASSER'
+        ELSE Segmento  END As  Segmento_historico_maestro,
+    '' As CeBe,
+    Fecha_Entrega,
+    IF(Fecha_Fin IS NULL, LAST_DAY(CURRENT_DATE(), YEAR), Fecha_Fin) As Fecha_Fin
+  --FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_MaestroHistoricoSegmentos`
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Maestro_Historico_Segmentos_Hoja1`
+  WHERE Cod_Unico IS NOT NULL
+  ORDER BY CodigoUnico, Fecha_Entrega),
+
+
+  CalendarioSegmentos As (
+  SELECT DISTINCT 
+    A.CodigoUnico,
+    B.oCalendarioKey As oCalendarioSegmento,
+    B.MonthYear
+  FROM Participaciones_MaestroHistoricoSegmentos A
+  CROSS JOIN Participaciones_CalendarioParticipaciones B
+  --WHERE A.CodigoUnico = 'EDS0150'
+  ORDER BY CodigoUnico, oCalendarioSegmento),
+
+
+  tmpHistoricoSegmentos_1 As (
+  SELECT
+    A.*,
+    B.oCalendarioSegmento,
+    B.MonthYear As Anio_mes_segmento,
+  FROM Participaciones_MaestroHistoricoSegmentos A
+  LEFT JOIN CalendarioSegmentos B
+    ON(A.CodigoUnico = B.CodigoUnico)
+   --CROSS JOIN CalendarioSegmentos B
+  WHERE B.oCalendarioSegmento BETWEEN A.Fecha_Entrega AND A.Fecha_Fin
+  ORDER BY CodigoUnico, oCalendarioSegmento,Fecha_Entrega   ),
+
+
+  tmpHistoricoSegmentos_2 As (
+  SELECT
+    A.*,
+    IF( MIN (oCalendarioSegmento) 
+        OVER (PARTITION BY A.CodigoUnico, Anio_mes_segmento ORDER BY CodigoUnico, oCalendarioSegmento
+              ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) = oCalendarioSegmento,
+        1, 0) As FlagSegmentoMinimo, --Fecha minima por Cod_Unico y Mes
+    IF( MAX (oCalendarioSegmento) 
+        OVER (PARTITION BY A.CodigoUnico, Anio_mes_segmento ORDER BY CodigoUnico, oCalendarioSegmento
+              ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) = oCalendarioSegmento,
+        1, 0) As FlagSegmentoMayor, -- Fecha Max por Cod_Unico y Mes
+    IF(oCalendarioSegmento = Fecha_Fin AND oCalendarioSegmento <> LAST_DAY(oCalendarioSegmento, MONTH),
+      EXTRACT(DAY FROM oCalendarioSegmento), NULL) As DiaPrev,
+    IF(oCalendarioSegmento = Fecha_Entrega AND EXTRACT(DAY FROM oCalendarioSegmento) <> 1,
+      EXTRACT(DAY FROM oCalendarioSegmento), NULL) As DiaCambio,
+    EXTRACT(DAY FROM LAST_DAY(oCalendarioSegmento, MONTH)) As UltimoDiaMes
+  FROM tmpHistoricoSegmentos_1 A
+  --WHERE A.CodigoUnico = 'EDS0150'
+  ORDER BY CodigoUnico, oCalendarioSegmento  ),
+
+  guiaDiasCambio As (
+    SELECT DISTINCT
+      CodigoUnico, 
+      Anio_mes_segmento,
+      oCalendarioSegmento,
+      Segmento_historico_maestro,
+      IFNULL(SUM(DiaPrev),0) As DiaPrev,
+      IFNULL(SUM(DiaCambio),0) As DiaCambioSegmento,
+      IFNULL(SUM(UltimoDiaMes) - SUM(DiaCambio) +1,0) As DiaCambio -- +1 porque debe contarse a si mismo el dia del cambio
+    FROM tmpHistoricoSegmentos_2
+    WHERE DiaCambio IS NOT NULL OR DiaPrev IS NOT NULL 
+    GROUP BY CodigoUnico, Anio_mes_segmento, oCalendarioSegmento, Segmento_historico_maestro )  ,
+
+  guiaDiasCambio2 As (
+    SELECT DISTINCT
+      * EXCEPT (oCalendarioSegmento,DiaCambioSegmento,DiaPrev, DiaCambio),
+      MAX (oCalendarioSegmento) OVER (PARTITION BY CodigoUnico, Anio_mes_segmento
+                                             ORDER BY CodigoUnico) As FechaCambio,
+      --DiaCambioSegmento,
+      MAX (DiaCambioSegmento) OVER (PARTITION BY CodigoUnico, Anio_mes_segmento
+                                           ORDER BY CodigoUnico) As DiaCambioSegmento, 
+      DiaPrev + DiaCambio As DiaCambios -- Para concatenar los campos en uno solo
+    FROM guiaDiasCambio
+    ORDER BY CodigoUnico ),
+
+    tmpHistoricoSegmentos_3 As (
+    SELECT 
+      A.* EXCEPT (UltimoDiaMes),
+      B.FechaCambio As FechaCambioSegmento,
+      B.DiaCambioSegmento,
+      B.DiaCambios,
+      IF(B.DiaCambios IS NOT NULL, A.UltimoDiaMes, NULL) As UltimoDiaMes
+    FROM tmpHistoricoSegmentos_2 A
+    LEFT JOIN guiaDiasCambio2 B
+      ON(A.CodigoUnico = B.CodigoUnico 
+        AND A.Anio_mes_segmento = B.Anio_mes_segmento 
+        AND A.Segmento_historico_maestro = B.Segmento_historico_maestro)
+    --WHERE A.CodigoUnico = 'EDS3206'
+    ORDER BY CodigoUnico, oCalendarioSegmento ),
+
+    fechaEntrega As (
+    SELECT DISTINCT
+      CodigoUnico,
+      MAX(Fecha_Entrega) As Fecha_de_entrega
+    FROM Participaciones_MaestroHistoricoSegmentos
+    GROUP BY CodigoUnico
+    ORDER BY Fecha_de_entrega DESC
+    )
+
+SELECT 
+  A.* EXCEPT(DiaPrev,	DiaCambio),
+  --IFNULL(IF(DiaCambioSegmento > 15, B.SegmentoMin, B.SegmentoMax), Segmento_historico_maestro) As Regla_Segmento,  --2022-03-30 DATR
+  Segmento_historico_maestro As Regla_Segmento, --2022-03-30 DATR se dejan de unificar los segmentos por mes
+  SAFE_DIVIDE( DiaCambios, UltimoDiaMes) As DiasEDS,
+  B.Fecha_de_entrega
+FROM tmpHistoricoSegmentos_3 A 
+LEFT JOIN fechaEntrega B 
+  USING (CodigoUnico )
+ORDER BY CodigoUnico, oCalendarioSegmento;
+
+
+
+
+
+------------------------------ MAESTROS DE CLASIFICACION POR CONDICIONES -------------------------------- 
+
+
+CREATE OR REPLACE TEMP TABLE  Participaciones_Ajustes As
+--CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Ajustes` As 
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  Calificacion As Volumen_ajuste
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Ajustes`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+
+CREATE OR REPLACE TEMP TABLE  Participaciones_ClienteOculto_Imagen  As
+--CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_ClienteOculto_Imagen` As 
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  CAST(Calificacion As NUMERIC) As Calificacion_CO_I,
+  CAST(0 As NUMERIC) As Imagen
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_ClienteOculto`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+--Insertamos Calificacion Imagen a la tabla de Cliente Oculto en datarefinada
+INSERT INTO Participaciones_ClienteOculto_Imagen
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  CAST(0 As NUMERIC) As Calificacion_CO_I,
+  CAST(Calificacion As NUMERIC) As Imagen
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Imagen`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+
+CREATE OR REPLACE TEMP TABLE  Participaciones_Confiable As
+--CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Confiable` As 
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  CAST(Calificacion As NUMERIC) As Confiable
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Confiable`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+/* 
+CREATE OR REPLACE TEMP TABLE Participaciones_ViveTerpel  As
+--CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_ViveTerpel` As 
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  CAST(Calificacion As NUMERIC) As Fidelizacion,
+  CAST(0 As INT64) As ReferidosViveTerpel,
+  CAST(0 As NUMERIC) As TransaccionesViveTerpel
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_ViveTerpel`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha; */
+
+
+--Insertamos Referidos Vive Tepel a Fidelizacion en datarefinada
+--INSERT INTO  Participaciones_ViveTerpel
+CREATE OR REPLACE TEMP TABLE Participaciones_ViveTerpel  As
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  --CAST(0 As NUMERIC) As Fidelizacion,
+  Calificacion As ReferidosViveTerpel,
+  CAST(0 As NUMERIC) As TransaccionesViveTerpel
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_ReferidosViveTerpel`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+--Insertamos Transacciones Vive Tepel a Fidelizacion en datarefinada
+INSERT INTO  Participaciones_ViveTerpel
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  --CAST(0 As NUMERIC) As Fidelizacion,
+  CAST(0 As INT64) As ReferidosViveTerpel,
+  CAST(Calificacion As NUMERIC) As TransaccionesViveTerpel
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_TransaccionesViveTerpel`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+
+CREATE OR REPLACE TEMP TABLE  Participaciones_Gastos As
+--CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Gastos` As 
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  --Fecha As Fecha_old, 
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  Calificacion As Gastos
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Gastos`
+--FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Maestro_Propias_Gastos`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+
+CREATE OR REPLACE TEMP TABLE Participaciones_MetodosNoConv_Galones  As
+--CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_RedencionNoConvencional_NoGalones` As 
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  --Fecha,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  Calificacion As No_Galones_NoConv
+--FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Maestro_Propias_MetodosNoConv_Galones`
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_MetodosNoConv_Galones`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+
+CREATE OR REPLACE TEMP TABLE  Participaciones_Empleados  As
+--CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_RotacionPersonal_Isleros` As 
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  Calificacion As Isleros
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Empleados`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+CREATE OR REPLACE TEMP TABLE  Participaciones_Retiros As
+--CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_RotacionPersonal_Retiros` As 
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  Calificacion As Retiros
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Retiros`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+
+CREATE OR REPLACE TEMP TABLE Participaciones_VolumenRumbo  As
+--CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_VolumenRumbo` As 
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  Calificacion As Volumen_rumbo
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_VolumenRumbo`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+
+CREATE OR REPLACE TEMP TABLE Participaciones_NoDecrecVentas_VolReferencia  As
+--CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_NoDecrecimientoVentas_VolReferencia` As 
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  Calificacion As Volumen_Contrato
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_NoDecrecVentas_VolReferencia`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+CREATE OR REPLACE TEMP TABLE Participaciones_NoDecrecVentas_Pesos  As
+--CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_NoDecrecimientoVentas_PesosXGalon` As 
+SELECT DISTINCT
+  Cod_Unico,
+  Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  Calificacion As Pesos_por_gal
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_NoDecrecVentas_Pesos`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------
+ -------------------------------- PARTE II: DATAMODELO PARTICIPACIONES ------------------------------------------
+------------------------------------------------------------------------------------------------------------------
+/*
+  PASO 2.1 - ControlDeltas. Control en la forma de ejecucion del procedure
+  
+    
+*/
+-- 1.2.1 Meses a ejecutar de acuerdo a la fecha final de cierre
+IF EXTRACT(DAY FROM vFechaEjecucion)< 32 THEN
+
+  SET vFechaRecarga = vFechaRecarga;
+
+ELSE 
+
+  SET vFechaRecarga = vFechaEjecucionTrunc;
+
+END IF;
+
+
+
+
+--WHILE vFechaRecarga <= vFechaEjecucionTrunc DO
+
+  
+
+  SET vUltimoDia_Liquidaciones = DATE_TRUNC( vFechaRecarga -1, MONTH );
+
+
+
+  /*
+    TABLA FACTURAS EDS
+    
+    Tablas SAP_resultados
+        satelite_resultados_VP_Comercial_Combustible.Margen_Costo_Facturas
+
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS As 
+  WITH segmentoCU As (
+    SELECT 
+      Codigo_UnicoFact As oCodigoUnico, 
+      CalendarioKeyFact As oCalendarioKey,  
+      Volumen_Vendido As Volumen_compra
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.LineaEDSGNV_FacturasEDS_SegmentoCU` A 
+  /* FROM `terpel-gtic-datalake.satelite_resultados_VP_Comercial_Combustible.Margen_Costo_Facturas` A  Condiciones_Costo_Margen_Franquicias
+    2022-04-25 DATR: cambia el apuntamiento del modelo de margen a Linea EDS-GNV para obtener el Volumen_compra*/
+    WHERE  A.CalendarioKeyFact BETWEEN vUltimoDia_Liquidaciones 
+      AND vFechaEjecucion
+      --AND LAST_DAY (vFechaRecarga, MONTH)
+    ORDER BY oCodigoUnico, oCalendarioKey   ),
+
+    segmentosHistTemp As (
+    SELECT DISTINCT
+      CodigoUnico,
+      oCalendarioSegmento,
+      --Segmento_historico_maestro
+      Regla_Segmento -- 
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos` 
+    ORDER BY CodigoUnico, Regla_Segmento
+    ) ,
+
+    volumenCompra As ( 
+    SELECT 
+      A.*,
+      B.Regla_Segmento
+    FROM segmentoCU A  
+    LEFT JOIN segmentosHistTemp B
+      ON (A.oCodigoUnico  = B.CodigoUnico AND A.oCalendarioKey = B.oCalendarioSegmento) 
+    ORDER BY oCodigoUnico, oCalendarioKey)
+
+
+  SELECT 
+    oCodigoUnico,
+    oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR, 
+    CAST(0 As NUMERIC) As VolumenDeVenta,/* 
+    CAST(NULL As STRING) As Centro_Beneficio,
+    CAST(NULL As STRING) As Centro_Logistico,
+    CAST(NULL As STRING) As oDestinatarioKey,
+    CAST(NULL As STRING) As oClienteKey, */
+    Volumen_compra,--
+    'Facturas' As Origen,
+    UPPER(Regla_Segmento) As Segmento_historico, 
+    --'' As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,--
+    CAST(0 As NUMERIC) As Gastos,--
+    CAST(0 As NUMERIC) As Volumen_ajuste,--
+    CAST(0 As NUMERIC) As Valor_Ajuste,
+    CAST(0 As NUMERIC) As Calificacion_CO_I,--
+    CAST(0 As NUMERIC) As Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,--
+    CAST(0 As INT64) As No_Galones_NoConv,--    
+    CAST(0 As NUMERIC) As Volumen_Contrato,--
+    CAST(0 As NUMERIC) As Pesos_por_gal,--    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM volumenCompra A -- Condiciones_Costo_Margen_Franquicias
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+
+  /*
+    TABLA TEMP_MARGEN
+    
+    Tablas SAP_resultados
+        satelite_resultados_VP_Comercial_Combustible.Margen_PVP_Costo_Ponderado
+  */
+  CREATE OR REPLACE TEMP TABLE Ventas_EDS As
+  WITH codUnicos_HS As (
+    SELECT DISTINCT CodigoUnico
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos
+    ORDER BY CodigoUnico),
+      
+    ventasEDS As (
+    SELECT 
+      oCodigoUnico,
+      Fecha, 
+      --Segmento_historico,  No existe en esta tabla
+      ValorZMMR,
+      VolumenVenta
+    FROM `terpel-gtic-datalake.satelite_resultados_VP_Comercial_Combustible.Margen_PVP_Costo_Ponderado` A -- Condiciones_Costo_Margen_Franquicias
+    INNER JOIN codUnicos_HS B
+      ON( A.oCodigoUnico = B.CodigoUnico)
+    WHERE Fecha BETWEEN vUltimoDia_Liquidaciones 
+      AND vFechaEjecucion
+      --AND LAST_DAY (vFechaRecarga, MONTH)
+      --AND REGEXP_CONTAINS(UPPER(Segmento_historico),'(OPESE|MASSER|FRANQ)')
+    ORDER BY oCodigoUnico, Fecha   ),
+
+    segmentosHistTemp As (
+    SELECT DISTINCT
+      CodigoUnico,
+      oCalendarioSegmento,
+      --Segmento_historico_maestro
+      Regla_Segmento -- 
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos` 
+    ORDER BY CodigoUnico, Regla_Segmento
+  )   
+    
+  SELECT 
+    A.*,
+    B.Regla_Segmento
+  FROM ventasEDS A  
+  LEFT JOIN segmentosHistTemp B
+    ON (A.oCodigoUnico  = B.CodigoUnico AND A.Fecha = B.oCalendarioSegmento) 
+  ORDER BY oCodigoUnico, Fecha;
+
+
+  -- Concatenamos Ventas_EDS a Facturas EDS
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT  
+    oCodigoUnico,
+    Fecha As oCalendarioKey,
+    CAST(ValorZMMR As NUMERIC) As ZMMR,
+    CAST(VolumenVenta As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'Margen/Venta' As Origen,
+    UPPER( Regla_Segmento) As Segmento_historico,
+    --'' As Segmento_historico, --
+    CAST(SAFE_DIVIDE(ValorZMMR, VolumenVenta) As NUMERIC) As  Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,
+    CAST(0 As NUMERIC) As Gastos,
+    CAST(0 As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    CAST(0 As NUMERIC) As Calificacion_CO_I,
+    CAST(0 As NUMERIC) As Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,
+    CAST(0 As INT64) As No_Galones_NoConv,
+    CAST(0 As NUMERIC) As Volumen_Contrato,
+    CAST(0 As NUMERIC) As Pesos_por_gal,    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM Ventas_EDS A  
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+
+
+  -- Insertamos Presupuesto
+  CREATE OR REPLACE TEMP TABLE Margen_Ppto As
+  WITH codUnicos_HS As (
+    SELECT DISTINCT CodigoUnico
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos
+    ORDER BY CodigoUnico),
+      
+    margen_ppto As (
+    SELECT 
+      oCodigoUnico,
+      oCalendarioKey,
+      FORMAT_DATE("%b-%Y", oCalendarioKey) As Mes_Anio,
+      PptoVolumen
+    FROM `terpel-gtic-datalake.satelite_resultados_VP_Comercial_Combustible.Margen_Presupuesto` A -- Condiciones_Costo_Margen_Franquicias
+    INNER JOIN codUnicos_HS B
+      ON( A.oCodigoUnico = B.CodigoUnico)
+    WHERE  A.oCalendarioKey BETWEEN vUltimoDia_Liquidaciones 
+      AND vFechaEjecucion
+      --AND LAST_DAY (vFechaRecarga, MONTH)
+      --AND REGEXP_CONTAINS(UPPER(SegmentoPresupuesto),'(OPESE|MASSER|FRANQ)') 2022-04-06 DATR se modific+o por el tema de los operadores Propios
+    ORDER BY oCodigoUnico, oCalendarioKey   ) ,
+
+    segmentosHistTemp As (
+    SELECT DISTINCT
+      CodigoUnico,
+      --oCalendarioSegmento,
+      Anio_mes_segmento,
+      --Segmento_historico_maestro
+      Regla_Segmento -- 
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos` 
+    ORDER BY CodigoUnico, Regla_Segmento
+    )
+
+    SELECT 
+      A.*,
+      B.Regla_Segmento
+    FROM margen_ppto A  
+    LEFT JOIN segmentosHistTemp B
+      ON (A.oCodigoUnico  = B.CodigoUnico AND A.Mes_Anio = B.Anio_mes_segmento) 
+    ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+  -- Insertamos PptoVolumen
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT 
+    oCodigoUnico,
+    oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR,
+    CAST(0 As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'PptoVolumen ' As Origen,
+    UPPER(Regla_Segmento) As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(PptoVolumen As NUMERIC) As PptoVolumen,
+    CAST(0 As NUMERIC) As Gastos,
+    CAST(0 As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    CAST(0 As NUMERIC) As Calificacion_CO_I,
+    CAST(0 As NUMERIC) As Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,    
+    CAST(0 As INT64) As No_Galones_NoConv,    
+    CAST(0 As NUMERIC) As Volumen_Contrato,
+    CAST(0 As NUMERIC) As Pesos_por_gal,    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM Margen_Ppto  -- Margen.Presupuesto.qvd
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+
+  --Insertamos Gastos
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT 
+    Cod_Unico As oCodigoUnico,
+    --A.MesAnio,
+    Fecha As oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR,
+    CAST(0 As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'Gastos' As Origen, --26/03/2022 DATR Cambia de 'Margen/Venta' a 'Gastos'
+    UPPER(Segmento) As Segmento_historico,
+    --'' As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,
+    CAST(Gastos As NUMERIC) As Gastos,
+    CAST(0 As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    CAST(0 As NUMERIC) As Calificacion_CO_I,
+    CAST(0 As NUMERIC) As Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,    
+    CAST(0 As INT64) As No_Galones_NoConv,    
+    CAST(0 As NUMERIC) As Volumen_Contrato,
+    CAST(0 As NUMERIC) As Pesos_por_gal,    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM  Participaciones_Gastos A
+  --FROM SAP_archivos_maestros.Participaciones_Gastos A
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+  --Insertamos Ajustes
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT 
+    Cod_Unico As oCodigoUnico,
+    Fecha As oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR,
+    CAST(0 As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'Ajustes' As Origen,  --26/03/2022 DATR Cambia de 'Margen/Venta' a 'Ajustes'
+    UPPER(Segmento) As Segmento_historico,
+    --'' As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,
+    CAST(0 As NUMERIC) As Gastos,
+    CAST(Volumen_ajuste As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    CAST(0 As NUMERIC) As Calificacion_CO_I,
+    CAST(0 As NUMERIC) As Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,    
+    CAST(0 As INT64) As No_Galones_NoConv,    
+    CAST(0 As NUMERIC) As Volumen_Contrato,
+    CAST(0 As NUMERIC) As Pesos_por_gal,    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM  Participaciones_Ajustes A
+  --FROM SAP_archivos_maestros.Participaciones_Ajustes
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+  --Insertamos Cliente Oculto
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT 
+    Cod_Unico As oCodigoUnico,
+    Fecha As oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR,
+    CAST(0 As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'CO_I' As Origen,
+    UPPER(Segmento) As Segmento_historico,
+    --'' As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,
+    CAST(0 As NUMERIC) As Gastos,
+    CAST(0 As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    Calificacion_CO_I,
+    Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,    
+    CAST(0 As INT64) As No_Galones_NoConv,    
+    CAST(0 As NUMERIC) As Volumen_Contrato,
+    CAST(0 As NUMERIC) As Pesos_por_gal,    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM  Participaciones_ClienteOculto_Imagen A
+  --FROM SAP_archivos_maestros.Participaciones_ClienteOculto_Imagen A
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+  --Insertamos Fidelizacion
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT 
+    Cod_Unico As oCodigoUnico,
+    Fecha As oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR,
+    CAST(0 As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'Fidelizacion' As Origen,
+    UPPER(Segmento) As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,
+    CAST(0 As NUMERIC) As Gastos,
+    CAST(0 As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    CAST(0 As INT64) As Calificacion_CO_I,
+    CAST(0 As NUMERIC) As Imagen,
+    --Fidelizacion,
+    ReferidosViveTerpel,
+    TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,
+    CAST(0 As INT64) As No_Galones_NoConv,    
+    CAST(0 As NUMERIC) As Volumen_Contrato,
+    CAST(0 As NUMERIC) As Pesos_por_gal,    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM  Participaciones_ViveTerpel A
+  --FROM SAP_archivos_maestros.Participaciones_ViveTerpel A
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+  -- Insertamos Confiable
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT 
+    Cod_Unico As oCodigoUnico,
+    Fecha As oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR,
+    CAST(0 As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'Confiable' As Origen,
+    UPPER(Segmento) As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,
+    CAST(0 As NUMERIC) As Gastos,
+    CAST(0 As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    CAST(0 As NUMERIC) As Calificacion_CO_I,
+    CAST(0 As NUMERIC) As Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    Confiable,   
+    CAST(0 As INT64) As No_Galones_NoConv,    
+    CAST(0 As NUMERIC) As Volumen_Contrato,
+    CAST(0 As NUMERIC) As Pesos_por_gal,    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM  Participaciones_Confiable A
+  --FROM SAP_archivos_maestros.Participaciones_Confiable A
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+
+  -- Insertamos Galones No Convencionales
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT 
+    Cod_Unico As oCodigoUnico,
+    Fecha As oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR,
+    CAST(0 As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'GalonesNoConv' As Origen, --26/03/2022 DATR Cambia de 'Margen/Venta' a 'GalonesNoConv'
+    UPPER(Segmento) As Segmento_historico,
+    --'' As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,
+    CAST(0 As NUMERIC) As Gastos,
+    CAST(0 As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    CAST(0 As NUMERIC) As Calificacion_CO_I,
+    CAST(0 As NUMERIC) As Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,    
+    No_Galones_NoConv,    
+    CAST(0 As NUMERIC) As Volumen_Contrato,
+    CAST(0 As NUMERIC) As Pesos_por_gal,    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM  Participaciones_MetodosNoConv_Galones A
+  --FROM SAP_archivos_maestros.Participaciones_RedencionNoConvencional_NoGalones A
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+  -- Insertamos Pesos Por Galon Acuerdo Colab No Decrecimiento Ventas 
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT 
+    Cod_Unico As oCodigoUnico,
+    Fecha As oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR,
+    CAST(0 As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'NoDecreVentas' As Origen,  --26/03/2022 DATR Cambia de 'Margen/Venta' a 'NoDecreVentas'
+    UPPER(Segmento) As Segmento_historico,
+    --'' As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,
+    CAST(0 As NUMERIC) As Gastos,
+    CAST(0 As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    CAST(0 As NUMERIC) As Calificacion_CO_I,
+    CAST(0 As NUMERIC) As Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,
+    
+    
+    CAST(0 As INT64) As No_Galones_NoConv,
+    
+    CAST(0 As NUMERIC) As Volumen_Contrato,
+    CAST(Pesos_por_gal As NUMERIC) As Pesos_por_gal, 
+    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM  Participaciones_NoDecrecVentas_Pesos A
+  --FROM SAP_archivos_maestros.Participaciones_NoDecrecimientoVentas_PesosXGalon A
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+  -- Insertamos No Decrecimiento Ventas Vol referencia
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT 
+    Cod_Unico As oCodigoUnico,
+    Fecha As oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR,
+    CAST(0 As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'NoDecreVentas' As Origen, --26/03/2022 DATR Cambia de 'Margen/Venta' a 'NoDecreVentas'
+    UPPER(Segmento) As Segmento_historico,
+    --'' As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,
+    CAST(0 As NUMERIC) As Gastos,
+    CAST(0 As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    CAST(0 As NUMERIC) As Calificacion_CO_I,
+    CAST(0 As NUMERIC) As Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,    
+    CAST(0 As INT64) As No_Galones_NoConv,    
+    CAST(Volumen_Contrato As NUMERIC) As Volumen_Contrato,
+    CAST(0 As NUMERIC) As Pesos_por_gal,    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM  Participaciones_NoDecrecVentas_VolReferencia A
+  --FROM SAP_archivos_maestros.Participaciones_NoDecrecVentas_VolReferencia A
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+
+  -- Insertamos Volumen Rumbo
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT 
+    Cod_Unico As oCodigoUnico,
+    Fecha As oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR,
+    CAST(0 As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'RotacionPersonal' As Origen,
+    UPPER(Segmento) As Segmento_historico,
+    --'' As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,
+    CAST(0 As NUMERIC) As Gastos,
+    CAST(0 As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    CAST(0 As NUMERIC) As Calificacion_CO_I,
+    CAST(0 As NUMERIC) As Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,    
+    CAST(0 As INT64) As No_Galones_NoConv,    
+    CAST(0 As NUMERIC) As Volumen_Contrato,
+    CAST(0 As NUMERIC) As Pesos_por_gal,    
+    CAST(Volumen_rumbo As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM  Participaciones_VolumenRumbo A
+  --FROM SAP_archivos_maestros.Participaciones_VolumenRumbo A
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+
+  -- Insertamos Isleros
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT 
+    Cod_Unico As oCodigoUnico,
+    Fecha As oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR,
+    CAST(0 As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'RotacionPersonal' As Origen,
+    UPPER(Segmento) As Segmento_historico,
+    --'' As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,
+    CAST(0 As NUMERIC) As Gastos,
+    CAST(0 As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    CAST(0 As NUMERIC) As Calificacion_CO_I,
+    CAST(0 As NUMERIC) As Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,    
+    CAST(0 As INT64) As No_Galones_NoConv,    
+    CAST(0 As NUMERIC) As Volumen_Contrato,
+    CAST(0 As NUMERIC) As Pesos_por_gal,    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    Isleros,
+    CAST(0 As INT64) As Retiros
+  FROM  Participaciones_Empleados A
+  --FROM SAP_archivos_maestros.Participaciones_Empleados
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+
+  -- Insertamos Retiros
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS
+  SELECT 
+    Cod_Unico As oCodigoUnico,
+    Fecha As oCalendarioKey,
+    CAST(0 As NUMERIC) As ZMMR,
+    CAST(0 As NUMERIC) As VolumenDeVenta,
+    CAST(0 As NUMERIC) As Volumen_compra,
+    'RotacionPersonal' As Origen,
+    UPPER(Segmento) As Segmento_historico,
+    --'' As Segmento_historico,
+    CAST(0 As NUMERIC) As Margen_Bruto,
+    CAST(0 As NUMERIC) As PptoVolumen,
+    CAST(0 As NUMERIC) As Gastos,
+    CAST(0 As NUMERIC) As Volumen_ajuste,
+    CAST(0 As INT64) As Valor_Ajuste,
+    CAST(0 As NUMERIC) As Calificacion_CO_I,
+    CAST(0 As NUMERIC) As Imagen,
+    --CAST(0 As NUMERIC) As Fidelizacion,
+    CAST(0 As INT64) As ReferidosViveTerpel,
+    CAST(0 As NUMERIC) As TransaccionesViveTerpel,
+    CAST(0 As NUMERIC) As Confiable,    
+    CAST(0 As INT64) As No_Galones_NoConv,    
+    CAST(0 As NUMERIC) As Volumen_Contrato,
+    CAST(0 As NUMERIC) As Pesos_por_gal,    
+    CAST(0 As NUMERIC) As Volumen_rumbo,
+    CAST(0 As INT64) As Isleros,
+    Retiros
+  FROM  Participaciones_Retiros A
+  --FROM SAP_archivos_maestros.Participaciones_Retiros
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+
+  /*
+    TABLA Facturas
+
+    Una vez concatenados los excel anteriores, traemos unos campos adicionales y se aplica una regla de negocio
+    adicional
+
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Facturas As 
+  WITH facturasEDS_temp As (
+    SELECT 
+      EXTRACT(YEAR FROM oCalendarioKey) As Anio_Vigencia,
+      FORMAT_DATE("%b-%Y", oCalendarioKey) As Mes_Anio,
+      DATE_TRUNC(oCalendarioKey, MONTH) As oCalendarioKeyTotales,
+      LAST_DAY(oCalendarioKey, MONTH)+1 As oCalendarioKeyTotales_Anterior,
+      FORMAT_DATE("%b-%Y", LAST_DAY(oCalendarioKey, MONTH)+1) As Mes_Anio_Anterior,
+      --C.Regla_Segmento As Segmento_minimo, --26/03/2022 DATR Regla_Segmento es el campo con Segmento unificado mensual 
+      '' As Segmento_minimo,
+      A.* ,
+      CASE WHEN UPPER(Segmento_historico) LIKE '%FRANQ%' THEN 'FRANQUICIADAS'
+        WHEN REGEXP_CONTAINS(UPPER(Segmento_historico),'(OPESE|MASSER)')  THEN 'MASSER'
+        ELSE NULL  END As  Segmento_maestro,
+      Margen_Bruto As Margen_minorista,
+      Margen_Bruto * VolumenDeVenta As Utilidad_Bruta,
+      '' As Condicion_Regalias,
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_FacturasEDS A
+    --WHERE  A.oCalendarioKey BETWEEN vUltimoDia_Liquidaciones AND LAST_DAY (vFechaRecarga, MONTH)
+    ORDER BY oCodigoUnico, oCalendarioKey 
+    ),
+
+    historicoSegmentos As (
+    SELECT DISTINCT
+      CodigoUnico,	
+      Anio_mes_segmento,
+      Segmento_historico_maestro,
+      Fecha_de_entrega, 
+      DiasEDS,
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos` C
+    --WHERE CodigoUnico = 'EDS0139' 
+    )
+
+  SELECT  
+    A.*,
+    C.Fecha_de_entrega,
+    C.DiasEDS
+  FROM facturasEDS_temp A
+  INNER JOIN historicoSegmentos C
+    ON (A.oCodigoUnico  = C.CodigoUnico AND A.Mes_Anio = C.Anio_mes_segmento
+    AND A.Segmento_maestro = C.Segmento_historico_maestro) 
+  ORDER BY oCodigoUnico, oCalendarioKey ;
+
+
+
+
+  /*
+    TABLA TotalesTemp
+
+  */
+  --CREATE OR REPLACE TEMP TABLE Participaciones_TotalesTemp As 
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp As
+  SELECT DISTINCT
+    oCodigoUnico,
+    --Centro As CeBe,
+    Segmento_maestro As Segmento_condicion,
+    Anio_Vigencia,
+    Mes_Anio,
+    oCalendarioKeyTotales As oCalendarioKey,
+    oCalendarioKeyTotales_Anterior As oCalendarioKey_Anterior,
+    --FORMAT_DATE("%b_%Y", DATE_ADD(oCalendarioKeyTotales, INTERVAL 1 MONTH)) As Mes_Facturacion, --28/03/2022 DATR
+    FORMAT_DATE("%b-%Y", oCalendarioKeyTotales) As Mes_Facturacion, 
+    '' As Origen_Total, --26/03/2022 DATR Origen vacio para que no afecte agrupacion
+    ROUND(SUM(VolumenDeVenta) + SUM(Volumen_Ajuste), 7) As Total_volumen_vendido, -- 17/01/2020 JSPF - Se modifica por VolumenDeVenta
+    ROUND(SUM(ZMMR),7) As Total_ZMMR, 
+    SAFE_DIVIDE(SUM(ZMMR), SUM(VolumenDeVenta)) As Total_Margen, --26/03/2022 DATR - Se calculaba mas arriba --
+    SUM(Utilidad_Bruta) As Total_Utilidad_Bruta,
+    SUM(Volumen_Compra) As Total_Volumen_Compra_MesAct,--
+    SUM(VolumenDeVenta)	As Total_VolumenDeVenta_MesAct,--
+    IFNULL(LAG(SUM(VolumenDeVenta)) OVER (PARTITION BY	oCodigoUnico,	Segmento_maestro
+      ORDER BY oCodigoUnico,	Segmento_maestro), 0) As Total_VolumenDeVenta_MesVenc,
+    SUM(Volumen_Contrato) As Total_Volumen_Contrato,--
+    SUM(Pesos_por_gal) As Total_Pesos_por_gal_No_Decrecimiento_Venta,--
+    SUM(PptoVolumen)	As Total_PptoVolumen_MesAct, -- Presupuesto--
+    IFNULL(LAG(SUM(PptoVolumen)) OVER (PARTITION BY	oCodigoUnico,	Segmento_maestro
+      ORDER BY oCodigoUnico,	Segmento_maestro), 0) As Total_PptoVolumen_MesVenc,
+    SUM(Gastos)	As Total_Gastos,  --Gastos--
+    /*IF( Cambio_Segmento = 1, SUM(Gastos)* DiasEDS, SUM(Gastos))	As Total_Gastos, 
+    SUM(PptoGastos)	As Total_PptoGastos_old, -- Presupuesto Gastos 01/08/2019 JOGCH		--
+    IF( DiasEDS IS NOT NULL, SUM(PptoGastos)* DiasEDS, SUM(PptoGastos))	As Total_PptoGastos, */
+    SUM(Volumen_Ajuste) As Total_Volumen_Ajuste, --
+    SUM(No_Galones_NoConv) As Total_No_Galones_NoConv_MesAct,
+    IFNULL(LAG(SUM(No_Galones_NoConv)) OVER (PARTITION BY	oCodigoUnico,	Segmento_maestro
+      ORDER BY oCodigoUnico,	Segmento_maestro), 0) As Total_No_Galones_NoConv_MesVenc,
+    ----
+    SUM(Calificacion_CO_I) As Total_Calificacion_CO_I_MesAct,
+    IFNULL(LAG(SUM(Calificacion_CO_I)) OVER (PARTITION BY	oCodigoUnico,	Segmento_maestro
+      ORDER BY oCodigoUnico,	Segmento_maestro), 0) As Total_Calificacion_CO_I_MesVenc,
+    SUM(Imagen) As Total_Imagen_MesAct,
+    IFNULL(LAG(SUM(Imagen)) OVER (PARTITION BY	oCodigoUnico,	Segmento_maestro
+      ORDER BY oCodigoUnico,	Segmento_maestro), 0) As Total_Imagen_MesVenc,
+    -------
+    /* SUM(Fidelizacion)  As Total_Fidelizacion_MesAct,
+    IFNULL(LAG(SUM(Fidelizacion)) OVER (PARTITION BY	oCodigoUnico,	Segmento_maestro
+      ORDER BY oCodigoUnico,	Segmento_maestro), 0) As Total_Fidelizacion, */    
+    SUM(ReferidosViveTerpel)  As Total_ClientesReferidos_MesAct,
+    IFNULL(LAG(SUM(ReferidosViveTerpel)) OVER (PARTITION BY	oCodigoUnico,	Segmento_maestro
+      ORDER BY oCodigoUnico,	Segmento_maestro), 0) As Total_ClientesReferidos_MesVenc,    
+    SUM(TransaccionesViveTerpel)  As Total_TransacFidelizadas_MesAct,
+    IFNULL(LAG(SUM(TransaccionesViveTerpel)) OVER (PARTITION BY	oCodigoUnico,	Segmento_maestro
+      ORDER BY oCodigoUnico,	Segmento_maestro), 0) As Total_TransacFidelizadas_MesVenc,
+    ---
+    SUM(Confiable) As Total_Confiable_MesAct,  
+    IFNULL(LAG(SUM(Confiable)) OVER (PARTITION BY	oCodigoUnico,	Segmento_maestro
+      ORDER BY oCodigoUnico,	Segmento_maestro), 0) As Total_Confiable_MesVenc,
+    --  
+    SUM(Isleros) As Isleros_MesAct, -- 31/03/2022 DATR - Se agregó el campo
+    IFNULL(LAG(SUM(Isleros)) OVER (PARTITION BY	oCodigoUnico,	Segmento_maestro
+      ORDER BY oCodigoUnico,	Segmento_maestro), 0) As Isleros, 
+    SUM(Retiros) As Retiros_MesAct, -- 31/03/2022 DATR - Se agregó el campo
+    IFNULL(LAG(SUM(Retiros)) OVER (PARTITION BY	oCodigoUnico,	Segmento_maestro
+      ORDER BY oCodigoUnico,	Segmento_maestro), 0) As Retiros,
+    --IF( Cambio_Segmento = 1, SUM(Volumen_rumbo)* DiasEDS, SUM(Volumen_rumbo))	As Total_Volumen_rumbo,--
+    SUM(Volumen_rumbo) As Total_Volumen_rumbo,-- 26/03/2022 DATR - Se agregó el campo
+    Fecha_de_entrega,
+    DiasEDS, /*
+    FechaCambioSegmento,
+    Cambio_Segmento, -- As Cambio_Segmento,
+    DiaCambioSegmento,
+    , --As DiasEDS, */
+    'Mensual'	As Agrupador, --Campo para set analisys,
+    '' As Total_volumen_vendido_MesPrev
+  FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Facturas
+  --WHERE Origen NOT IN ('CO_I','Confiable','GalonesNoConv')
+  --26/03/2022 DATR - Se comenta Origen para generar Totales
+  GROUP BY Mes_Anio, oCalendarioKey, oCalendarioKeyTotales_Anterior , oCodigoUnico, Anio_Vigencia, Segmento_maestro, Fecha_de_entrega, DiasEDS  
+    --Cambio_Segmento, FechaCambioSegmento, DiaCambioSegmento,DiasEDS--, Anio_Vigencia--Origen,
+  ORDER BY oCodigoUnico, oCalendarioKey,  Segmento_maestro; --, Origen_Total;
+
+
+
+  /*
+    TABLA MAESTRO DE CONDICIONES
+
+    Maestros Excel
+        SAP_archivos_maestros.Franquicias_Participaciones_Maestro_condiciones_Condiciones
+
+  -- consulta que crea la fuente 
+    CREATE OR REPLACE TABLE SAP_archivos_maestros.Franquicias_Participaciones_Maestro_condiciones_Condiciones As 
+    SELECT * 
+    FROM `terpel-gtic-datalake.SAP_archivos_maestros.Franquicias_Participaciones_Maestro_condiciones_New`
+    ORDER BY Regla, Ano_Vigencia, Segmento,Rango_Inicial
+
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones As
+  SELECT 
+    CAST(Ano_Vigencia As INT64) As Ano_Vigencia,
+    --Mes_liquidacion,	
+    IF(EXTRACT(MONTH FROM Mes_liquidacion) = 1,
+      DATE(EXTRACT(YEAR FROM Mes_liquidacion),
+      EXTRACT(DAY FROM Mes_liquidacion),
+      EXTRACT(MONTH FROM Mes_liquidacion)), Mes_liquidacion) As Mes_liquidacion,
+    Regla,	
+    Rango_Inicial,
+    Rango_Final,
+    Valor
+  --FROM SAP_archivos_maestros.Franquicias_Participaciones_Maestro_condiciones_Condiciones
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Maestro_Condiciones_Hoja1`
+  WHERE Regla IS NOT NULL
+  ORDER BY Regla,	 Mes_liquidacion, Rango_Inicial;
+
+
+
+
+  /*
+    IV) TABLA LIQUIDACION
+
+    Producto de multiples joins que traen varios campos desde el maestro Condiciones
+    
+  */
+  -- A) Añadimos GananciaInicial o PARTICIPACIÓN en ventas de COMBUSTIBLES ($) 
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_VentaCombustibles As
+  --CREATE OR REPLACE TEMP TABLE Participaciones_Liquidacion_VentaCombustibles As
+  WITH condiciones_VentaCombustibles As (
+    SELECT DISTINCT
+      * EXCEPT (Mes_liquidacion)
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla ='VentaCombustibles' 
+    ORDER BY Ano_Vigencia,  Rango_Inicial, Rango_Final ),
+    
+    participaciones_Totales_Vol As (
+    SELECT DISTINCT
+      Anio_Vigencia,
+      oCodigoUnico,
+      oCalendarioKey,
+      Segmento_condicion,
+      --Total_volumen_vendido --28/03/2022 DATR Se usa VolumenVenta segun el doc de liquidaciones
+      Total_VolumenDeVenta_MesAct As Total_VolumenDeVenta
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp  ),
+    --WHERE Origen_Total = 'Margen/Venta' AND Agrupador = 'Mensual'),
+
+    liquidacion_VentaCombustibles As (
+    SELECT 
+      B.Anio_Vigencia,
+      B.oCodigoUnico,
+      B.oCalendarioKey,
+      B.Total_VolumenDeVenta,
+      B.Segmento_condicion,
+      --CAST(REPLACE(A.Rango_Inicial, '-','0') AS INT64) As Rango_Inicial,
+      CAST(A.Rango_Inicial AS INT64) As Rango_Inicial,		
+      CAST(A.Rango_Final AS INT64) As Rango_Final,	
+      CAST(A.Valor AS INT64) As Valor,
+      Regla,
+    FROM condiciones_VentaCombustibles A
+    LEFT JOIN participaciones_Totales_Vol B 
+      ON ( A.Ano_Vigencia = B.Anio_Vigencia  )
+    ORDER BY Ano_Vigencia, Rango_Inicial, Rango_Final )
+    
+  SELECT 
+    *,
+    Total_VolumenDeVenta * Valor As Participacion_VentaCombustibles,
+    '' As Ganancia_inicial
+  FROM liquidacion_VentaCombustibles
+  WHERE Total_VolumenDeVenta BETWEEN Rango_Inicial AND Rango_Final
+  ORDER BY oCodigoUnico,oCalendarioKey, Rango_Inicial, Rango_Final;
+
+
+
+  /*
+    C) Añadimos la Participacion por Rotacion de Personal
+
+    Cambios a realizar por motivo del Caso Clic (Petición) 325594
+    Se carga los rangos para el numero de Isleros
+    Se carga la condiciones del Numero de Isleros que tiene cada estacion.
+    Dependiendo del numero de Isleros se debe aplicar un rango para el numero de Retiros.
+    1 - 19 -> Regla Retiro1
+    20 en Adelante -> Regla Retiro2
+    Se cargan los rangos de Retiro1 y Retiro2
+    Se cargan las condiciones de Retiro
+    Dependiendo de la Regla (Retiro1 o Retiro2) se evalue la cantidad de personal retirado y se halla el valor $/gal
+    Con el valor $/gal se calcula el valor en Pesos de la participacion por rotacion de personal (Volumen Vendido Mes Ant * $/gal)
+
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_RotacionPersonal As
+  --CREATE OR REPLACE TEMP TABLE NumIsleros As
+  WITH condiciones_NumIsleros As (
+    SELECT DISTINCT
+      * --EXCEPT (Mes_liquidacion)
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla = 'Empleados'
+    ORDER BY Mes_liquidacion,  Rango_Inicial, Rango_Final ),
+    
+    numIsleros As (
+    SELECT 
+      oCodigoUnico, 
+      Anio_Vigencia,
+      oCalendarioKey, 
+      Segmento_condicion, 
+      IFNULL(Isleros, 0) as NumIsleros
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp A),
+
+    numIsleros2 As (
+    SELECT 
+      A.*,
+      Regla,
+      CAST(Rango_Inicial AS INT64 ) As Rango_Inicial,	
+      CAST(Rango_Final AS INT64) As Rango_Final,	
+      Valor
+    FROM numIsleros A
+    LEFT JOIN condiciones_NumIsleros B 
+      ON ( A.oCalendarioKey = B.Mes_liquidacion )),
+
+    liquidacion_NumIsleros As (
+    SELECT 
+      *
+    FROM numIsleros2 
+    WHERE NumIsleros BETWEEN Rango_Inicial AND Rango_Final
+    ORDER BY oCodigoUnico, oCalendarioKey, Rango_Inicial, Rango_Final),
+
+  --CREATE OR REPLACE TEMP TABLE Liquidacion_Retiros As
+    participaciones_NumIsleros As (
+    SELECT 
+      oCodigoUnico,
+      Anio_Vigencia, 
+      oCalendarioKey, 
+      Valor As Regla,
+      Regla As Regla_Islero, 
+      Segmento_condicion, 
+      NumIsleros,
+      Rango_Inicial As Rango_Inicial_Isleros, 
+      Rango_Final  As Rango_Final_Isleros
+    FROM liquidacion_NumIsleros
+    --FROM Liquidacion_NumIsleros
+    ),
+    
+    Retiros1 As (
+    SELECT 
+      oCodigoUnico,
+      Anio_Vigencia,
+      oCalendarioKey, 
+      Segmento_condicion, 
+      IFNULL(Retiros, 0) as NumRetiros
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp A  ),
+
+    Retiros2 As (
+    SELECT 
+      A.*,
+      B.NumIsleros,
+      B.Rango_Inicial_Isleros,	
+      B.Rango_Final_Isleros,
+      B.Regla_Islero,
+      B.Regla
+    FROM Retiros1 A
+    LEFT JOIN participaciones_NumIsleros B 
+      ON(A.oCodigoUnico = B.oCodigoUnico AND
+        A.oCalendarioKey = B.oCalendarioKey AND
+        A.Segmento_condicion = B.Segmento_condicion )),
+
+    condiciones_Retiros As (
+    SELECT DISTINCT
+      * --EXCEPT (Mes_liquidacion)
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla LIKE 'Retiro_'
+    ORDER BY Mes_liquidacion,  Rango_Inicial, Rango_Final ),
+
+    Retiros3 As (
+    SELECT 
+      A.* EXCEPT(NumRetiros),
+      A.NumRetiros,
+      CAST(B.Rango_Inicial AS INT64 ) As Rango_Inicial,	
+      CAST(B.Rango_Final AS INT64) As Rango_Final,	
+      CAST(B.Valor As NUMERIC) As Pesos_Galon_Rotacion
+    FROM Retiros2 A
+    LEFT JOIN condiciones_Retiros B
+      ON( A.oCalendarioKey = B.Mes_liquidacion AND 
+          A.Regla = B.Regla  )
+    --WHERE NumRetiros BETWEEN Rango_Inicial AND Rango_Final
+    ORDER BY Anio_Vigencia,  Rango_Inicial_Isleros, Rango_Final_Isleros)
+
+  SELECT  
+    *,
+    '' As Origen_Total,
+    --'Mensual' As Agrupador
+  FROM Retiros3 
+  WHERE NumRetiros BETWEEN Rango_Inicial AND Rango_Final
+  ORDER BY oCodigoUnico, oCalendarioKey,  Rango_Inicial;
+
+
+
+
+  -- D) Añadimos la participacion de Cliente Oculto
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_ClienteOculto As
+  --CREATE OR REPLACE TEMP TABLE Participaciones_Liquidacion_ClienteOculto As
+  WITH condiciones_ClienteOculto As (
+    SELECT DISTINCT
+      * --EXCEPT (Mes_liquidacion)
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla = 'ClienteOculto'
+    ORDER BY Mes_liquidacion,  Rango_Inicial, Rango_Final ),
+    
+    Totales_CO_I As (
+    SELECT DISTINCT
+      Anio_Vigencia, 
+      oCodigoUnico,
+      Segmento_condicion,
+      oCalendarioKey,
+      --Agrupador,
+      IF( EXTRACT(MONTH FROM oCalendarioKey) IN (1,5,7,10), 
+      --IF( Total_Imagen_MesVenc <> 0 AND Total_Imagen_MesVenc IS NOT NULL, 
+          (Total_Calificacion_CO_I_MesVenc * 0.3) + (Total_Imagen_MesVenc * 0.7),
+          Total_Calificacion_CO_I_MesVenc) As Total_Calificacion_CO_I        
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp ),
+
+    CO As (
+    SELECT 
+      B.oCodigoUnico,
+      A.Ano_Vigencia,	
+      B.oCalendarioKey,
+      B.Segmento_condicion,	
+      A.Regla,	
+      B.Total_Calificacion_CO_I,
+      CAST(Rango_Inicial AS NUMERIC) As Rango_Inicial,	
+      CAST(Rango_Final AS NUMERIC) As Rango_Final,	
+      CAST(A.Valor AS NUMERIC) As Valor,
+    FROM condiciones_ClienteOculto A
+    LEFT JOIN Totales_CO_I B 
+      ON ( A.Mes_liquidacion = B.oCalendarioKey ))
+    
+  SELECT 
+    *
+  FROM CO
+  WHERE Total_Calificacion_CO_I BETWEEN Rango_Inicial AND Rango_Final
+  ORDER BY oCodigoUnico,oCalendarioKey, Rango_Inicial, Rango_Final;
+
+
+
+
+  -- E) Añadimos La participacion por el programa ViveTerpel
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_ViveTerpel As
+  WITH condiciones_TransacViveTerpel As (
+    SELECT DISTINCT
+      * 
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla = 'TransaccionesViveTerpel'
+    ORDER BY Mes_liquidacion, Rango_Inicial, Rango_Final ),
+    
+    totales_TransacViveTerpel As (
+    SELECT DISTINCT
+      Anio_Vigencia, 
+      oCodigoUnico,
+      Segmento_condicion,
+      oCalendarioKey,
+      Total_TransacFidelizadas_MesVenc As TransacFidelizadas_MesVenc
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp ),
+
+    transacViveTerpel As (
+    SELECT 
+      A.*,   
+      B.Regla As Regla_transac,	
+      CAST(B.Rango_Inicial AS NUMERIC) As Rango_Inicial_transac,	
+      CAST(B.Rango_Final AS NUMERIC) As Rango_Final_transac,	
+      CAST(B.Valor AS INT64) As Valor_transac,
+    FROM totales_TransacViveTerpel A 
+    LEFT JOIN condiciones_TransacViveTerpel B 
+      ON ( A.oCalendarioKey = B.Mes_liquidacion  )
+    ORDER BY Ano_Vigencia, oCalendarioKey, Rango_Inicial
+    ),
+
+    liquidacion_transacViveTerpel As (
+    SELECT 
+      *
+    FROM transacViveTerpel
+    WHERE TransacFidelizadas_MesVenc BETWEEN Rango_Inicial_transac AND Rango_Final_transac
+    ),
+
+
+    condiciones_ReferidosViveTerpel As (
+    SELECT DISTINCT
+      * 
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla = 'ReferidosViveTerpel'
+    ORDER BY Mes_liquidacion,  Rango_Inicial, Rango_Final ),
+    
+
+    totales_ReferidosViveTerpel As (
+    SELECT DISTINCT
+      Anio_Vigencia, 
+      oCodigoUnico,
+      Segmento_condicion,
+      oCalendarioKey,
+      Total_ClientesReferidos_MesVenc As ClientesReferidos_MesVenc
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp ) ,
+
+    referidosViveTerpel As (
+    SELECT 
+      A.* EXCEPT (ClientesReferidos_MesVenc),
+      A.ClientesReferidos_MesVenc,   
+      B.Regla As Regla_referidos,
+      CAST(B.Rango_Inicial AS INT64) As Rango_Inicial_referidos,	
+      CAST(B.Rango_Final AS INT64) As Rango_Final_referidos,	
+      CAST(B.Valor AS INT64) As Valor_referidos,
+    FROM totales_ReferidosViveTerpel A 
+    LEFT JOIN condiciones_ReferidosViveTerpel B
+      ON ( A.oCalendarioKey = B.Mes_liquidacion  )
+    --WHERE oCodigoUnico =  vCodigoUnico
+    ORDER BY Ano_Vigencia, oCalendarioKey, Rango_Inicial
+    ),
+    
+    liquidacion_referidosViveTerpel As (
+    SELECT  
+      * ,
+    FROM referidosViveTerpel 
+    WHERE  ClientesReferidos_MesVenc BETWEEN Rango_Inicial_referidos AND Rango_Final_referidos
+    )  ,
+    /*
+      DATR 2022-05-23: Cambio en la manera de calcular ViveTerpel, ahora se genera una maestra por cada calificacion,
+                       luego se unen en una sola maestra unica.
+    */
+    liquidacion_ViveTerpel As (
+    SELECT DISTINCT
+      A.oCodigoUnico,
+      A.Segmento_condicion,
+      A.oCalendarioKey,
+      A.Total_TransacFidelizadas_MesVenc As TransacFidelizadas_MesVenc,
+      B.Regla_transac,	
+      B.Rango_Inicial_transac,	
+      B.Rango_Final_transac,	
+      IFNULL(B.Valor_transac, 0) As Valor_transac,
+      A.Total_ClientesReferidos_MesVenc As ClientesReferidos_MesVenc,
+      C.Regla_referidos,	
+      C.Rango_Inicial_referidos,	
+      C.Rango_Final_referidos,	
+      IFNULL(C.Valor_referidos, 0) As Valor_referidos,
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp A 
+    LEFT JOIN liquidacion_transacViveTerpel B 
+      ON (A.oCodigoUnico = B.oCodigoUnico AND
+        A.oCalendarioKey = B.oCalendarioKey AND
+        A.Segmento_condicion = B.Segmento_condicion)
+    LEFT JOIN liquidacion_referidosViveTerpel C 
+      ON (A.oCodigoUnico = C.oCodigoUnico AND
+        A.oCalendarioKey = C.oCalendarioKey AND
+        A.Segmento_condicion = C.Segmento_condicion)
+    --WHERE A.oCodigoUnico = vCodigoUnico
+    ORDER BY oCodigoUnico, oCalendarioKey, Rango_Inicial_transac 
+    )
+  
+  
+  SELECT DISTINCT
+    *,
+    Valor_transac + Valor_referidos As Participacion_ViveTerpel
+  FROM liquidacion_ViveTerpel
+  WHERE Valor_transac + Valor_referidos <> 0
+    --AND oCodigoUnico =  vCodigoUnico  
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+
+
+  -- F) Añadimos La participacion por Redencion de Metodos no convencionales
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_MetodosNoConvencionales As
+  --CREATE OR REPLACE TEMP TABLE Participaciones_Liquidacion_MetodosNoConvencionales As
+  WITH condiciones_MetodosNoConv As (
+    SELECT DISTINCT
+      * --EXCEPT (Mes_liquidacion)
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla = 'MetodosNoConv'
+    ORDER BY Mes_liquidacion, Rango_Inicial, Rango_Final ),
+    
+    totales_GalonesNoConv As (
+    SELECT DISTINCT
+      EXTRACT(YEAR FROM oCalendarioKey_Anterior) As Anio_Vigencia, 
+      oCodigoUnico,
+      Segmento_condicion,
+      oCalendarioKey,
+      Total_No_Galones_NoConv_MesVenc,
+      IF(oCalendarioKey < '2022-02-01', Total_VolumenDeVenta_MesVenc, Total_VolumenDeVenta_MesAct) As Total_VolumenDeVenta,
+      --Agrupador,
+      --SAFE_DIVIDE(Total_No_Galones_NoConv_MesAct , Total_VolumenDeVenta_MesAct ) As perc_Volumen_NoConvencional,
+      CASE WHEN oCalendarioKey < '2022-02-01' 
+             THEN IFNULL(SAFE_DIVIDE(Total_No_Galones_NoConv_MesVenc , Total_VolumenDeVenta_MesVenc ), 0)
+           ELSE  IFNULL(SAFE_DIVIDE(Total_No_Galones_NoConv_MesVenc , Total_VolumenDeVenta_MesAct ), 0) END As perc_Volumen_NoConvencional
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp ),
+
+    totales_GalonesNoConv2 As (
+    SELECT 
+      B.oCodigoUnico,	
+      B.oCalendarioKey,
+      A.Ano_Vigencia,	
+      B.Segmento_condicion,
+      A.Regla,	
+      B.Total_No_Galones_NoConv_MesVenc,
+      B.Total_VolumenDeVenta,
+      B.perc_Volumen_NoConvencional,
+      CAST(A.Rango_Inicial AS NUMERIC) As Rango_Inicial,	
+      CAST(Rango_Final AS NUMERIC) As Rango_Final,		
+      CAST(A.Valor AS NUMERIC) As Valor,
+    FROM condiciones_MetodosNoConv A
+    LEFT JOIN totales_GalonesNoConv B 
+      ON ( B.oCalendarioKey = A.Mes_liquidacion  ))
+    
+  SELECT 
+    *
+  FROM totales_GalonesNoConv2
+  WHERE perc_Volumen_NoConvencional BETWEEN Rango_Inicial AND Rango_Final
+  ORDER BY oCodigoUnico,oCalendarioKey, Rango_Inicial, Rango_Final;
+
+
+
+
+  -- G) Añadimos La participacion de Confiable
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_Confiable As
+  --CREATE OR REPLACE TEMP TABLE Liquidacion_Confiable As
+  WITH condiciones_Confiable As (
+    SELECT DISTINCT
+      * --EXCEPT (Mes_liquidacion)
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla = 'Confiable'
+    ORDER BY Mes_liquidacion,  Rango_Inicial, Rango_Final ),
+    
+    Totales_Confiable As (
+    SELECT DISTINCT
+      oCodigoUnico,
+      oCalendarioKey,
+      Anio_Vigencia, 
+      Segmento_condicion,
+      --Agrupador
+      Total_Confiable_MesVenc
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp ),
+
+    Confiable As (
+    SELECT 
+      B.oCodigoUnico,	
+      B.oCalendarioKey,
+      A.Ano_Vigencia,	
+      B.Segmento_condicion,
+      A.Regla,	
+      B.Total_Confiable_MesVenc,
+      CAST(A.Rango_Inicial AS INT64) As Rango_Inicial,	
+      CAST(A.Rango_Final AS INT64) As Rango_Final,		
+      CAST(A.Valor AS NUMERIC) As Valor,
+    FROM condiciones_Confiable A
+    LEFT JOIN Totales_Confiable B 
+      ON ( B.oCalendarioKey = A.Mes_liquidacion  ))
+    
+  SELECT 
+    *
+  FROM Confiable
+  WHERE Total_Confiable_MesVenc BETWEEN Rango_Inicial AND Rango_Final
+  ORDER BY oCodigoUnico,oCalendarioKey, Rango_Inicial, Rango_Final;
+
+
+
+
+  -- H) Añadimos La participacion de Cumplimiento Presupuesto
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_CumplimientoPpto As
+  --CREATE OR REPLACE TEMP TABLE Liquidacion_CumplimientoPpto As
+  WITH condiciones_CumplimientoPpto As (
+    SELECT DISTINCT
+      *
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla = 'CumpPpto'
+    ORDER BY Mes_liquidacion ,  Rango_Inicial, Rango_Final ),
+    
+    Totales_CumplimientoPpto As (
+    SELECT DISTINCT
+      EXTRACT(YEAR FROM oCalendarioKey_Anterior) As Anio_Vigencia, 
+      oCodigoUnico,
+      Segmento_condicion,
+      oCalendarioKey_Anterior As oCalendarioKey,
+      Total_VolumenDeVenta_MesAct As Total_VolumenDeVenta,
+      Total_Volumen_Compra_MesAct As Total_VolumenCompra,
+      Total_PptoVolumen_MesAct As Total_PptoVolumen,
+      IF( oCalendarioKey < '2022-04-01',
+          SAFE_DIVIDE (Total_VolumenDeVenta_MesAct, Total_PptoVolumen_MesAct),
+          SAFE_DIVIDE (Total_Volumen_Compra_MesAct, Total_PptoVolumen_MesAct)) As Cumplimiento_Ppto
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp  ),
+
+    cumplimientoPpto As (
+    SELECT
+      B.Anio_Vigencia,
+      B.oCodigoUnico,
+      B.oCalendarioKey,
+      B.Total_VolumenDeVenta,
+      B.Total_VolumenCompra,
+      B.Total_PptoVolumen,
+      B.Segmento_condicion,	
+      B.Cumplimiento_Ppto,
+      --CAST(REPLACE(A.Rango_Inicial, '-','0') AS NUMERIC) As Rango_Inicial,
+      CAST(A.Rango_Inicial AS NUMERIC) As Rango_Inicial,	
+      CAST(A.Rango_Final AS NUMERIC) As Rango_Final,		
+      --CAST(REPLACE(A.Rango_Final, ',','.') AS NUMERIC) As Rango_Final,
+      CAST(A.Valor AS NUMERIC) As Valor,
+      Regla
+    FROM condiciones_CumplimientoPpto A
+    LEFT JOIN Totales_CumplimientoPpto B 
+      ON ( A.Mes_liquidacion = B.oCalendarioKey  ))
+    
+  SELECT DISTINCT
+    *,
+    Valor As Participacion_CumplimientoVentas
+  FROM cumplimientoPpto
+  WHERE Cumplimiento_Ppto BETWEEN Rango_Inicial AND Rango_Final
+  ORDER BY oCodigoUnico,oCalendarioKey, Rango_Inicial, Rango_Final;
+
+
+
+  /*
+    TABLA FINAL TOTALES
+
+    Aqui todos los insumos y las calificaciones quedan en una sola tabla.
+
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales As
+  --CREATE OR REPLACE TEMP TABLE Participaciones_Totales As 
+  SELECT DISTINCT 
+    A.oCodigoUnico,
+    A.Anio_Vigencia,
+    A.Mes_Anio,
+    A.oCalendarioKey,
+    A.Segmento_condicion,
+    A.Fecha_de_entrega As FechaCambioSegmento,
+    A.DiasEDS,
+    A.Total_PptoVolumen_MesAct,
+    A.Total_PptoVolumen_MesVenc,
+    A.Total_VolumenDeVenta_MesAct,
+    A.Total_VolumenDeVenta_MesVenc,
+    A.Total_Volumen_Compra_MesAct,
+    A.Total_ZMMR,
+    A.Total_Margen, 
+    A.Total_Utilidad_Bruta,
+    A.Total_Gastos,
+  -- B) PARTICIPACION VENTA COMBUSTIBLE
+    IFNULL(CONCAT(B.Regla,' Entre ', B.Rango_Inicial, ' y ', B.Rango_Final), 'Fuera_de_rango') As Regla_VentaCombustible,
+    IFNULL(B.Valor, 0) As Pesos_gal_VentaCombustible,
+    IFNULL(B.Participacion_VentaCombustibles, 0) As Participacion_VentaCombustibles,
+  -- I) PARTICIPACION NO DECRECIMIENTO VENTAS
+    A.Total_Volumen_Contrato,
+    A.Total_Pesos_por_gal_No_Decrecimiento_Venta As Pesos_NoDecrecVentas,
+    IF( A.Total_VolumenDeVenta_MesAct > A.Total_Volumen_Contrato,
+        IF((A.Total_VolumenDeVenta_MesAct * A.Total_Pesos_por_gal_No_Decrecimiento_Venta) <> 0,
+            A.Total_VolumenDeVenta_MesAct * A.Total_Pesos_por_gal_No_Decrecimiento_Venta,
+            A.Total_Gastos), 
+        A.Total_VolumenDeVenta_MesAct * A.Total_Pesos_por_gal_No_Decrecimiento_Venta) As Participacion_No_Decrecimiento_Venta, --12/04/2022 DATR Ajustes por fabrica
+  -- C) PARTICIPACION ROTACION PERSONAL
+    A.Isleros As Numero_Isleros,
+    IFNULL(CONCAT(C.Regla_Islero,' Entre ', C.Rango_Inicial_Isleros, ' y ', C.Rango_Final_Isleros), 'Fuera_de_rango') As Regla_Isleros,
+    A.Retiros As Numero_Retiros,
+    IFNULL(CONCAT(C.Regla,' Entre ', C.Rango_Inicial, ' y ', C.Rango_Final), 'Fuera_de_rango') As Regla_Retiros,
+    IFNULL(C.Pesos_Galon_Rotacion,0)  As Pesos_Galon_Participacion_Rotacion,
+    IFNULL(C.Pesos_Galon_Rotacion * A.Total_VolumenDeVenta_MesAct, 0) As Participacion_Rotacion_Personal,
+  -- D) PARTICIPACION CLIENTE OCULTO E IMAGEN
+    A.Total_Calificacion_CO_I_MesVenc,
+    IFNULL(CONCAT(D.Regla,' Entre ', D.Rango_Inicial, ' y ', D.Rango_Final), 'Fuera_de_rango') As Regla_CO_I,
+    A.Total_Imagen_MesVenc,
+    IFNULL(D.Total_Calificacion_CO_I, 0) As Total_Calificacion_CO_I_final,
+    IFNULL(D.Valor,0) As Participacion_ClienteOculto,
+  -- E & F) PARTICIPACION METODOS NO CONVENCIONALES & VIVE TERPEL
+    -- IMPORTANTE:
+    --A.Total_No_Millas_Redimidas * F.Valor As Participacion_MillaRedimida, --28/03/2022 DATR Insumo retirado por usuario
+    --A.Total_No_Millas_Redimidas * F.Valor As Participacion_MetodosNoConvencionales, --28/03/2022 DATR
+    A.Total_No_Galones_NoConv_MesVenc,
+    IFNULL(CONCAT(F.Regla,' Entre ', F.Rango_Inicial, ' y ', F.Rango_Final), 'Fuera_de_rango') As Regla_MetodosNoConvenc,
+    IFNULL(F.perc_Volumen_NoConvencional, 0) As perc_Volumen_NoConvencional,
+    IFNULL(F.Valor, 0) As Pesos_Participacion_MillaRedimida,
+    IFNULL(F.Total_VolumenDeVenta, 0) As Total_VolumenDeVenta_NoConv,
+    IFNULL(F.Valor * F.Total_VolumenDeVenta, 0) As Participacion_MetodosNoConvencionales, --28/03/2022 DATR Asi debido al retiro de MillasRedimidas
+    A.Total_TransacFidelizadas_MesAct,
+    A.Total_TransacFidelizadas_MesVenc,
+    IFNULL(CONCAT(E.Regla_transac,' Entre ', E.Rango_Inicial_transac, ' y ', E.Rango_Final_transac), 
+           'Fuera_de_rango') As Regla_TransacViveTerpel,
+    IFNULL(E.Valor_transac, 0) As Valor_transac,
+    A.Total_ClientesReferidos_MesAct,
+    A.Total_ClientesReferidos_MesVenc,/* 
+    IF(IFNULL(E.Valor_referidos, 0) <> 0, 
+       IFNULL(CONCAT(E.Regla_referidos,' Entre ', E.Rango_Inicial_referidos, ' y ', E.Rango_Final_referidos),'Fuera_de_rango'), 
+       'Fuera_de_rango' ) As Regla_ReferidosViveTerpel, */
+    IFNULL(CONCAT(E.Regla_referidos,' Entre ', E.Rango_Inicial_referidos, ' y ', E.Rango_Final_referidos),'Fuera_de_rango') As Regla_ReferidosViveTerpel,
+    IFNULL(E.Valor_referidos, 0) As Valor_referidos,
+    IFNULL(E.Participacion_ViveTerpel, 0 ) As Participacion_ViveTerpel,
+    CASE WHEN A.oCalendarioKey < '2022-02-01' THEN IFNULL(F.Valor * F.Total_VolumenDeVenta, 0)
+         WHEN A.oCalendarioKey = '2022-02-01' 
+           THEN IFNULL(F.Valor * A.Total_VolumenDeVenta_MesAct, 0) + IFNULL(E.Participacion_ViveTerpel, 0 )
+         ELSE  IFNULL(E.Participacion_ViveTerpel, 0 ) END As Participacion_MetodosNoConv_ViveTerpel,
+    /* IF( A.oCalendarioKey < '2022-02-01',  
+      IFNULL(F.Valor * F.Total_VolumenDeVenta, 0), 
+      IFNULL(E.Participacion_ViveTerpel, 0 ) + IFNULL(F.Valor * F.Total_VolumenDeVenta, 0)) As Participacion_MetodosNoConv_ViveTerpel, */
+  -- G) PARTICIPACION CONFIABLE
+    A.Total_Confiable_MesVenc,
+    IFNULL(CONCAT(G.Regla,' Entre ', G.Rango_Inicial, ' y ', G.Rango_Final), 'Fuera_de_rango') As Regla_Confiable,
+    IFNULL(G.Valor,0) As Participacion_Confiable,
+  -- H) PARTICIPACION CUMPLIMIENTO PRESUPUESTO
+    IFNULL(H.Cumplimiento_Ppto, 0) As Cumplimiento_Ppto,
+    IFNULL(H.Participacion_CumplimientoVentas,0) As Participacion_CumplimientoVentas,
+    IFNULL(A.Total_Volumen_Ajuste,0) As Participacion_Adicional,
+    A.Total_Volumen_rumbo 
+  FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp A
+  LEFT JOIN SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_VentaCombustibles B
+  --LEFT JOIN GananciaInicial B
+    ON(A.oCodigoUnico = B.oCodigoUnico AND
+      A.oCalendarioKey = B.oCalendarioKey AND
+      A.Segmento_condicion = B.Segmento_condicion)
+  LEFT JOIN SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_RotacionPersonal C
+  --LEFT JOIN Liquidacion_Retiros C
+    ON(A.oCodigoUnico = C.oCodigoUnico AND
+      A.oCalendarioKey = C.oCalendarioKey  AND
+      A.Segmento_condicion = C.Segmento_condicion)
+  LEFT JOIN SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_ClienteOculto D
+  --LEFT JOIN Liquidacion_ClienteOculto D
+    ON(A.oCodigoUnico = D.oCodigoUnico AND
+      A.oCalendarioKey = D.oCalendarioKey  AND
+      A.Segmento_condicion = D.Segmento_condicion)
+  LEFT JOIN SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_ViveTerpel E
+  --LEFT JOIN Liquidacion_ViveTerpel E
+    ON(A.oCodigoUnico = E.oCodigoUnico AND
+      A.oCalendarioKey = E.oCalendarioKey  AND
+      A.Segmento_condicion = E.Segmento_condicion)
+  LEFT JOIN SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_MetodosNoConvencionales F
+  --LEFT JOIN Liquidacion_MillasRedimidas F
+    ON(A.oCodigoUnico = F.oCodigoUnico AND
+      A.oCalendarioKey = F.oCalendarioKey  AND
+      A.Segmento_condicion = F.Segmento_condicion)
+  LEFT JOIN SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_Confiable G
+  --LEFT JOIN Liquidacion_Confiable G
+    ON(A.oCodigoUnico = G.oCodigoUnico AND
+      A.oCalendarioKey = G.oCalendarioKey   AND
+      A.Segmento_condicion = G.Segmento_condicion)
+  LEFT JOIN SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_CumplimientoPpto H
+  --LEFT JOIN Liquidacion_CumplimientoPpto H
+    ON(A.oCodigoUnico = H.oCodigoUnico AND
+      A.oCalendarioKey = H.oCalendarioKey   AND
+      A.Segmento_condicion = H.Segmento_condicion)
+  ORDER BY oCodigoUnico,oCalendarioKey, Segmento_condicion;
+
+
+
+-- DATR 2025-05-25: Modificacion de Participacion Cumplimiento Ventas en Masser
+  UPDATE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales 
+  SET  Participacion_CumplimientoVentas = 1148304.04440721
+  WHERE oCodigoUnico = 'EDS3599'
+      AND oCalendarioKey = '2022-03-01'
+      AND Segmento_condicion = 'MASSER';
+
+
+  UPDATE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales 
+  SET  Total_Gastos = 27127154.488274
+  WHERE oCodigoUnico = 'EDS3471'
+      AND oCalendarioKey = '2022-03-01'
+      AND Segmento_condicion = 'MASSER';
+
+
+  
+
+  /*
+    TABLA MAESTRO EDS
+    
+    Maestras Excel
+        SAP_archivos_maestros.Franquicias_Participaciones_Codigos Unicos Margen_Homologacion
+
+  */
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_MaestroEDS As
+  WITH codUnicos_HS As (
+      SELECT DISTINCT CodigoUnico
+      FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos
+      ORDER BY CodigoUnico)
+
+  SELECT DISTINCT 
+    Codigo_unico As oCodigoUnico,	
+    IF(EXTRACT(MONTH FROM mes_liquidacion) = 1,
+      DATE(EXTRACT(YEAR FROM mes_liquidacion),EXTRACT(DAY FROM mes_liquidacion),EXTRACT(MONTH FROM mes_liquidacion)), 
+      mes_liquidacion) As mes_liquidacion,	
+    --mes_liquidacion,		
+    CASE WHEN UPPER(Segmento_liquidacion) LIKE '%FRANQ%' THEN 'FRANQUICIADAS'
+      WHEN REGEXP_CONTAINS(UPPER(Segmento_liquidacion),'(OPESE|MASSER)')  THEN 'MASSER'
+      ELSE NULL  END As Segmento_liquidacion,	
+    Estacion,		
+    Regional,		
+    Departamento,		
+    Ciudad,
+    JefedeZona,		
+    Centro_logistico,	
+    Centro_beneficio,	
+    CAST( Codigo_Solicitante As STRING ) As Codigo_Solicitante,
+    CAST( Codigo_destinatario As STRING ) As Codigo_destinatario,
+  FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_Maestro_EDS_Hoja1`  A
+  INNER JOIN codUnicos_HS B
+    ON( A.Codigo_unico = B.CodigoUnico)
+  --WHERE Codigo_unico = 'EDS3926'
+  ORDER BY oCodigoUnico;
+
+
+
+
+
+  /*
+    TABLA LIQUIDACIONES
+
+    Tabla que genera desde la Participacion del Franquiciado hasta los calculos de regalia
+
+  */
+  -- Liquidacion temp2
+  CREATE OR REPLACE TABLE  SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion1 As
+  WITH Participaciones_Liquidacion1 As (
+  SELECT 
+    A.oCodigoUnico,
+    B.Estacion,		
+    B.Regional,	
+    A.Anio_Vigencia,
+    A.Mes_Anio,
+    A.oCalendarioKey, 
+    A.Segmento_condicion,
+    A.FechaCambioSegmento,
+    B.Centro_logistico,	
+    B.Centro_beneficio,	
+    B.Codigo_solicitante,
+    B.Codigo_destinatario,
+    DiasEDS,
+    A.* EXCEPT( oCodigoUnico,Anio_Vigencia,Mes_Anio,oCalendarioKey, Segmento_condicion, FechaCambioSegmento, DiasEDS),
+    Participacion_VentaCombustibles + Participacion_No_Decrecimiento_Venta + Participacion_CumplimientoVentas + 
+      Participacion_ClienteOculto + Participacion_Confiable + Participacion_MetodosNoConv_ViveTerpel + Participacion_Rotacion_Personal + 
+      Participacion_Adicional As Participacion_Aliado,
+  FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales A
+  LEFT JOIN  SAP_resultados_VP_Comercial_Combustibles.Participaciones_MaestroEDS B
+    ON (A.oCodigoUnico = B.oCodigoUnico AND
+        A.oCalendarioKey = B.mes_liquidacion AND
+        A.Segmento_condicion = B.Segmento_liquidacion)
+  --WHERE oCalendarioKey = vFechaRecarga
+    --'2022-01-01'
+  ORDER BY oCodigoUnico,oCalendarioKey, Segmento_condicion),
+  
+  
+  liquidaciones_participacionAliado2 As (
+    SELECT 
+      * EXCEPT(Participacion_Adicional, Participacion_Aliado),
+      Participacion_Adicional As Participacion_Adicional_old,
+      IF( Participacion_Aliado BETWEEN 1 AND 5000000, Participacion_Adicional + (5000000- Participacion_Aliado), 
+        Participacion_Adicional ) As Participacion_Adicional, 
+      Participacion_Aliado As Participacion_Aliado_old,
+      Participacion_Aliado -  Participacion_Adicional As Participacion_Aliado1 --vers1
+    FROM Participaciones_Liquidacion1),
+    
+
+    liquidaciones_ParticipacionTerpelInicial As (
+    SELECT 
+      * , 
+      Participacion_Aliado1 + Participacion_Adicional As Participacion_Aliado, --vers final
+    -- 2022-04-11 DATR Ganancia Aliado se calcula dependiendo del operador o segmento.
+      --(Participacion_Aliado + Participacion_Adicional) - Total_Gastos As Ganancia_Aliado, 
+      IF(Segmento_condicion = 'FRANQUICIADAS',(Participacion_Aliado1 + Participacion_Adicional) - Participacion_No_Decrecimiento_Venta,
+        Participacion_Aliado1 - Participacion_No_Decrecimiento_Venta) As Ganancia_Aliado,
+      Total_Utilidad_Bruta - (Participacion_Aliado1 + Participacion_Adicional) As Participacion_TERPEL_Inicial,   
+      Total_Gastos - Participacion_No_Decrecimiento_Venta As Faltante_en_Gasto
+    FROM liquidaciones_participacionAliado2),
+    
+
+    liquidaciones_ParticipacionTerpelFinal_franq As (
+    SELECT 
+      * ,
+      IF ( Participacion_TERPEL_Inicial < 0, 
+          (Total_Utilidad_Bruta * 0.015) - Participacion_TERPEL_Inicial, 0) As Incentivo_Competitivo1,/*
+      IF (Segmento_condicion = 'FRANQUICIADAS', IF(Participacion_TERPEL_Inicial < 0, 
+                Total_Utilidad_Bruta * 0.015, Participacion_TERPEL_Inicial),0) As Participacion_TERPEL_Final_Franq, */
+      --IF (Segmento_condicion = 'MASSER', Total_Utilidad_Bruta - Total_Gastos, 0) As Calculo_perdida_Masser,
+      --IF (Segmento_condicion = 'FRANQUICIADAS', Total_Utilidad_Bruta - Total_Gastos, 0) As Calculo_perdida_Franq,
+      IFNULL(Total_Utilidad_Bruta - Total_Gastos, 0) As Calculo_perdida,
+    FROM liquidaciones_ParticipacionTerpelInicial ),
+    
+
+    liquidaciones_PerdidaTotalEDS As (
+    SELECT 
+      *, --EXCEPT (Incentivo_Competitivo1, Calculo_perdida_Masser, Calculo_perdida_Franq),
+      --Incentivo_Competitivo1,
+      --Calculo_perdida_Franq,
+      --IF(Calculo_perdida_Masser < 0,
+      IF( Calculo_perdida < 0, 
+          Participacion_Adicional + Ganancia_Aliado - (Total_Utilidad_Bruta - Total_Gastos),0) As Perdida_Total_EDS
+    FROM liquidaciones_ParticipacionTerpelFinal_franq)
+
+
+    SELECT 
+      * EXCEPT (Incentivo_Competitivo1),
+      Incentivo_Competitivo1,
+      IF( Perdida_Total_EDS <> 0, 0, Incentivo_Competitivo1 ) As Incentivo_Competitivo,
+      Perdida_Total_EDS * 0.7 As PerdidaTotal_70
+    FROM liquidaciones_PerdidaTotalEDS
+    ORDER BY oCodigoUnico, oCalendarioKey, Segmento_condicion;
+
+
+/* 
+  SET perdidadAsumidaTerpel = (SELECT SUM(PerdidaTotal_70)	
+                              FROM  Participaciones_Liquidacion2 
+                              WHERE Segmento_condicion = 'MASSER');
+
+  SET partTerpelInicialTotal = (SELECT SUM(Participacion_TERPEL_Inicial)	
+                                FROM  Participaciones_Liquidacion2 
+                                WHERE Segmento_condicion = 'MASSER' AND 
+                                  Participacion_TERPEL_Inicial > 0 ); */
+
+
+
+  CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion As
+  -- Maestra para el total de la perdida asumida por Terpel
+  WITH totalPerdidaAsumida As (
+    SELECT DISTINCT
+      --oCodigoUnico, 
+      oCalendarioKey, 
+      SUM(PerdidaTotal_70)	OVER ( PARTITION BY oCalendarioKey) As perdidadAsumidaTerpel
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion1
+    WHERE Segmento_condicion = 'MASSER' 
+    ORDER BY oCalendarioKey ),
+
+  -- Maestra para el total de la perdida asumida por Terpel
+    totalParticipTerpelInicial As (
+    SELECT DISTINCT
+      --oCodigoUnico, 
+      oCalendarioKey, 
+      SUM(Participacion_TERPEL_Inicial)	
+      OVER ( PARTITION BY oCalendarioKey) As partTerpelInicialTotal
+    FROM  SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion1
+    WHERE Segmento_condicion = 'MASSER' 
+      AND Participacion_TERPEL_Inicial > 0 
+    ORDER BY  oCalendarioKey ) ,
+
+
+    totalesPerdidaMasserXMes As (
+      SELECT
+        A.oCalendarioKey, 
+        A.perdidadAsumidaTerpel,
+        B.partTerpelInicialTotal
+      FROM totalPerdidaAsumida A
+      LEFT JOIN totalParticipTerpelInicial B 
+        USING ( oCalendarioKey )
+      ORDER BY oCalendarioKey ),
+
+  
+    liquidaciones_PerdidaAsumidaTerpel As (
+    SELECT 
+      *,
+      IF(A.Segmento_condicion = 'MASSER', --AND Calculo_perdida_Masser < 0,
+        B.perdidadAsumidaTerpel, 0) As Perdida_Asumida_Terpel,
+      IF(A.Segmento_condicion = 'MASSER', --AND Participacion_TERPEL_Inicial > 0, 
+        B.partTerpelInicialTotal, 0) As Particip_Terpel_Inicial_Total
+    FROM  SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion1 A
+    LEFT JOIN totalesPerdidaMasserXMes B
+      USING ( oCalendarioKey)
+    ORDER BY oCodigoUnico, oCalendarioKey, Segmento_condicion ),
+
+
+    liquidaciones_PerdidaAsumidaTerpel2 As (
+    SELECT 
+      *,
+      IF( Participacion_TERPEL_Inicial > 0, 
+          SAFE_DIVIDE(Participacion_TERPEL_Inicial, Particip_Terpel_Inicial_Total),0) As Distribucion_Perdida_X_EDS_perc
+    FROM liquidaciones_PerdidaAsumidaTerpel ),
+
+
+    liquidaciones_DistribucionPerdidaXEDS As (
+    SELECT 
+      *,
+      Distribucion_Perdida_X_EDS_perc * Perdida_Asumida_Terpel As Distribucion_Perdida_X_EDS_pesos
+    FROM liquidaciones_PerdidaAsumidaTerpel2 ),
+
+
+    liquidaciones_ParticipacionTerpelFinal_Masser As (
+    SELECT DISTINCT
+      *,
+      IF( Participacion_TERPEL_Inicial > 0 AND Segmento_condicion = 'FRANQUICIADAS', Participacion_TERPEL_Inicial, 
+          IF( Calculo_perdida > 0 AND Segmento_condicion = 'FRANQUICIADAS', Total_Utilidad_Bruta * 0.015, 
+          0)) As Participacion_TERPEL_Final_Franq, ---,
+      IF( PerdidaTotal_70 <> 0, 0, IF( Incentivo_Competitivo <> 0 AND Segmento_condicion = 'MASSER', Total_Utilidad_Bruta * 0.015,
+          IF (Segmento_condicion = 'MASSER',Participacion_TERPEL_Inicial - Distribucion_Perdida_X_EDS_pesos, 
+          0))) As Participacion_TERPEL_Final_Masser 
+    FROM liquidaciones_DistribucionPerdidaXEDS  ),
+
+
+    liquidaciones_ParticipacionTerpelFinal As (
+    SELECT DISTINCT
+      *,
+      IFNULL(Participacion_TERPEL_Final_Franq,0) + IFNULL(Participacion_TERPEL_Final_Masser,0) As Participacion_TERPEL_Final,
+      IF( Anio_Vigencia > 2019, 0.19, 0) As IVA,
+      IF( Anio_Vigencia > 2019, 2.12, 0) As Condicion_Regalia,
+      --IF(A.Origen_Total = 'Margen/Venta' AND A.Anio_Vigencia > 2019, 2.12, 0) * A.Total_volumen_vendido As Regalias, --22/02/2022 DATR ajuste por doc liquidacion
+      IF( Anio_Vigencia > 2019, 2.12, 0) * Total_Volumen_Compra_MesAct As Regalia,
+      IF( Anio_Vigencia > 2019, 2.12, 0) * Total_PptoVolumen_MesAct As Ppto_Regalia,
+      SAFE_DIVIDE(Total_Volumen_rumbo, Total_Volumen_Compra_MesAct) As Participacion_Rumbo_Regalia
+    FROM liquidaciones_ParticipacionTerpelFinal_Masser ),
+    
+
+    volColtanques As (
+    SELECT DISTINCT
+      Cod_Unico,
+      CASE WHEN UPPER(Segmento) LIKE '%FRANQ%' THEN 'FRANQUICIADAS'
+        WHEN REGEXP_CONTAINS(UPPER(Segmento),'(OPESE|MASSER)')  THEN 'MASSER'
+        ELSE NULL  END As  Segmento,
+      --Fecha As Fecha_old,
+      IF(EXTRACT(MONTH FROM Fecha) = 1,
+        DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+      CAST(Calificacion As NUMERIC) As Volumen_Coltanques
+    FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_VolumenClientes` 
+    WHERE Cod_Unico IS NOT NULL
+    ORDER BY Cod_Unico, Fecha  ),
+    
+
+    liquidaciones_volColtanques As (
+    SELECT 
+      A.* EXCEPT ( Total_Volumen_rumbo ),
+      Participacion_Rumbo_Regalia * Regalia As Regalia_Rumbo,
+      Regalia - (Participacion_Rumbo_Regalia * Regalia) As Regalia_EDS_Propias,
+      Regalia * IVA As IVA_19_pesos,
+      Regalia + (Regalia * IVA) As Factura_Regalia,
+      A.Total_Volumen_rumbo,
+      SAFE_DIVIDE(Total_Volumen_rumbo, Total_VolumenDeVenta_MesAct) As Participacion_Rumbo,
+      B.Volumen_Coltanques,
+      B.Volumen_Coltanques * 100 As Participacion_Coltanques
+    FROM liquidaciones_ParticipacionTerpelFinal A
+    LEFT JOIN volColtanques B
+      ON(A.oCodigoUnico = B.Cod_Unico AND
+        A.oCalendarioKey = B.Fecha AND
+        A.Segmento_condicion = B.Segmento)
+    ORDER BY oCodigoUnico, oCalendarioKey, Segmento_condicion )
+    
+
+  SELECT 
+    * EXCEPT(Regalia_Rumbo, Regalia_EDS_Propias),
+    (Participacion_Rumbo * Participacion_TERPEL_Final) + Participacion_Coltanques As Rumbo_pesos,
+    (Participacion_Rumbo * Participacion_TERPEL_Final) + Participacion_Coltanques As Factura_ParticipacionTerpel_Canal13_Rumbo,
+    Participacion_TERPEL_Final - ((Participacion_Rumbo * Participacion_TERPEL_Final) + Participacion_Coltanques)
+      As EDS_Propias_pesos,
+    Participacion_TERPEL_Final - ((Participacion_Rumbo * Participacion_TERPEL_Final) + Participacion_Coltanques)
+      As Factura_ParticipacionTerpel_Canal12_Propias,
+    Regalia_Rumbo,
+    Regalia_Rumbo As Factura_Regalia_Canal13_Rumbo,
+    Regalia_EDS_Propias,
+    Regalia_EDS_Propias As Factura_Regalia_Canal12_Propias,
+  FROM liquidaciones_volColtanques
+  ORDER BY oCodigoUnico, oCalendarioKey, Segmento_condicion ;
+
+
+
+  -- Eliminamos lo que pueda existir de la tabla principal de Liquidaciones para fechas iguales o superiores al primer mes a liquidar
+  DELETE FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidaciones 
+  WHERE oCalendarioKey > vUltimoDia_Liquidaciones;
+
+
+
+  -- Tabla final que consume PowerBI: Agregamos a la tabla Liquidaciones la informacion de los meses liquidados
+  INSERT INTO SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidaciones
+  SELECT
+    oCodigoUnico,
+    Estacion,-- 2022-05-10 DATR campos agregados
+    Regional, --
+    oCalendarioKey,
+    Segmento_condicion, 
+    FechaCambioSegmento, 
+    Centro_logistico, --
+    Centro_beneficio,-- 
+    Codigo_Solicitante,--
+    Codigo_destinatario, --
+    Total_PptoVolumen_MesVenc,
+    Total_PptoVolumen_MesAct,
+    Total_Volumen_Compra_MesAct,
+    Total_VolumenDeVenta_MesVenc,
+    Total_VolumenDeVenta_MesAct,
+    Total_Margen,
+    CAST( 0 As NUMERIC ) As Total_PptoMargen,
+    Total_Utilidad_Bruta,
+    Total_Gastos,
+    CAST( 0 As NUMERIC ) As Total_PptoGastos,
+    Pesos_gal_VentaCombustible,
+    Participacion_VentaCombustibles,
+    Pesos_NoDecrecVentas, 
+    Participacion_No_Decrecimiento_Venta,
+    Numero_Isleros,
+    Numero_Retiros,
+    Pesos_Galon_Participacion_Rotacion,
+    Participacion_Rotacion_Personal,
+    Total_Calificacion_CO_I_MesVenc,
+    Total_Imagen_MesVenc,
+    Total_Calificacion_CO_I_final,
+    Participacion_ClienteOculto,
+    CAST( 0 As NUMERIC ) As Fidelizacion,
+    Total_ClientesReferidos_MesAct,
+    Total_ClientesReferidos_MesVenc,
+    Total_TransacFidelizadas_MesAct,
+    Total_TransacFidelizadas_MesVenc,
+    Participacion_ViveTerpel,
+    perc_Volumen_NoConvencional,
+    Pesos_Participacion_MillaRedimida,
+    Participacion_MetodosNoConvencionales,
+    Participacion_MetodosNoConv_ViveTerpel,
+    Total_Confiable_MesVenc,
+    Participacion_Confiable,
+    Cumplimiento_Ppto,
+    Participacion_CumplimientoVentas,
+    Participacion_Adicional,
+    Participacion_Aliado,	
+    Ganancia_Aliado,	
+    Participacion_TERPEL_Inicial,
+    Faltante_en_Gasto,	
+    Incentivo_Competitivo,	
+    PerdidaTotal_70,	
+    Perdida_Asumida_Terpel,
+    Particip_Terpel_Inicial_Total,		
+    Participacion_TERPEL_Final,
+    Regalia,
+    Ppto_Regalia,	
+    Participacion_Rumbo_Regalia,
+    Regalia_Rumbo,
+    Regalia_EDS_Propias,	
+    IVA_19_pesos,	
+    Factura_Regalia,
+    Total_Volumen_rumbo, 
+    Participacion_Rumbo,
+    Volumen_Coltanques,
+    Rumbo_pesos,
+    EDS_Propias_pesos,
+  FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion
+  WHERE oCalendarioKey  > vUltimoDia_Liquidaciones
+    --BETWEEN '2021-12-01' AND '2022-02-01'
+  ORDER BY oCalendarioKey, oCodigoUnico, Segmento_condicion ;
+
+
+/* 
+  -- ACTUALIZAMOS VARIABLES DEL BUCLE 
+  SET vFechaRecarga = LAST_DAY( vFechaRecarga, MONTH ) +1;
+
+
+
+END WHILE; */
+
+
+
+
+
+/*
+  TABLA DE PRESUPUESTOS DE REFERENCIA PARA LA CAPA GRAFICA
+
+*/
+  --Ppto_UtilidadBruta
+CREATE OR REPLACE TEMP TABLE Participaciones_PptosReferencia As 
+SELECT DISTINCT
+  Cod_Unico,
+  --Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  CAST(Calificacion As NUMERIC) As Ppto_UtilidadBruta,
+  CAST(0 As NUMERIC) As Ppto_Participacion_Aliado,
+  CAST(0 As NUMERIC) As Ppto_Participacion_TERPEL,
+  CAST(0 As NUMERIC) As Ppto_Incentivo_Competitivo,
+  CAST(0 As NUMERIC) As PptoGastos,
+  CAST(0 As NUMERIC) As PptoMargen,
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_PptoUtilidadBruta`
+ORDER BY Cod_Unico, Fecha;
+
+
+  --Ppto_Participacion_Aliado
+INSERT INTO Participaciones_PptosReferencia
+SELECT DISTINCT
+  Cod_Unico,
+  --Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  CAST(0 As NUMERIC) As Ppto_UtilidadBruta,
+  CAST(Calificacion As NUMERIC) As Ppto_Participacion_Aliado,
+  CAST(0 As NUMERIC) As Ppto_Participacion_TERPEL,
+  CAST(0 As NUMERIC) As Ppto_Incentivo_Competitivo,
+  CAST(0 As NUMERIC) As PptoGastos,
+  CAST(0 As NUMERIC) As PptoMargen,
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_PptoParticipacionAliado`
+ORDER BY Cod_Unico, Fecha;
+
+
+--Ppto_Participacion_TERPEL
+INSERT INTO Participaciones_PptosReferencia
+SELECT DISTINCT
+  Cod_Unico,
+  --Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  CAST(0 As NUMERIC) As Ppto_UtilidadBruta,
+  CAST(0 As NUMERIC) As Ppto_Participacion_Aliado,
+  CAST(Calificacion As NUMERIC) As Ppto_Participacion_TERPEL,
+  CAST(0 As INT64) As Ppto_Incentivo_Competitivo,
+  CAST(0 As NUMERIC) As PptoGastos,
+  CAST(0 As NUMERIC) As PptoMargen,
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_PptoParticipacionTERPEL`
+ORDER BY Cod_Unico, Fecha;
+
+
+  --Ppto_Incentivo_Competitivo
+INSERT INTO Participaciones_PptosReferencia
+SELECT DISTINCT
+  Cod_Unico,
+  --Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  CAST(0 As NUMERIC) As Ppto_UtilidadBruta,
+  CAST(0 As NUMERIC) As Ppto_Participacion_Aliado,
+  CAST(0 As NUMERIC) As Ppto_Participacion_TERPEL,
+  CAST(Calificacion As NUMERIC) As Ppto_Incentivo_Competitivo,
+  CAST(0 As NUMERIC) As PptoGastos,
+  CAST(0 As NUMERIC) As PptoMargen,
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_PptoIncentivoCompetitivo`
+ORDER BY Cod_Unico, Fecha;
+
+
+  --PptoGastos
+INSERT INTO Participaciones_PptosReferencia
+SELECT DISTINCT
+  Cod_Unico,
+  --Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  CAST(0 As NUMERIC) As Ppto_UtilidadBruta,
+  CAST(0 As NUMERIC) As Ppto_Participacion_Aliado,
+  CAST(0 As NUMERIC) As Ppto_Participacion_TERPEL,
+  CAST(0 As NUMERIC) As Ppto_Incentivo_Competitivo,
+  CAST(Calificacion As NUMERIC) As PptoGastos,
+  CAST(0 As NUMERIC) As PptoMargen,
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_PptoGastos`
+WHERE Cod_Unico IS NOT NULL
+ORDER BY Cod_Unico, Fecha;
+
+
+  --PptoMargen
+INSERT INTO Participaciones_PptosReferencia
+SELECT DISTINCT
+  Cod_Unico,
+  --Segmento,
+  --Fecha As Fecha_old,
+  IF(EXTRACT(MONTH FROM Fecha) = 1,
+    DATE(EXTRACT(YEAR FROM Fecha),EXTRACT(DAY FROM Fecha),EXTRACT(MONTH FROM Fecha)), Fecha) As Fecha,
+  CAST(0 As NUMERIC) As Ppto_UtilidadBruta,
+  CAST(0 As NUMERIC) As Ppto_Participacion_Aliado,
+  CAST(0 As NUMERIC) As Ppto_Participacion_TERPEL,
+  CAST(0 As NUMERIC) As Ppto_Incentivo_Competitivo,
+  CAST(0 As NUMERIC) As PptoGastos,
+  CAST(Calificacion As NUMERIC) As PptoMargen
+FROM `terpel-gtic-datalake.SAP_archivos_maestros.Participaciones_PptoMargen`
+WHERE Cod_Unico IS NOT NULL
+--AND Cod_Unico = 'EDS3206' AND Fecha >= '2021-12-01'
+ORDER BY Cod_Unico, Fecha;
+
+
+-- 
+CREATE OR REPLACE TABLE SAP_resultados_VP_Comercial_Combustibles.Participaciones_PptosReferencia As 
+WITH codUnicos_HS As (
+    SELECT DISTINCT CodigoUnico
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos
+    ORDER BY CodigoUnico)
+
+SELECT DISTINCT
+  Cod_Unico,/* 
+  CASE WHEN UPPER(Segmento) LIKE '%FRANQ%' THEN 'FRANQUICIADAS'
+    WHEN REGEXP_CONTAINS(UPPER(Segmento),'(OPESE|MASSER)')  THEN 'MASSER'
+    ELSE NULL  END As  Segmento, */
+  '-' As Segmento,
+  Fecha,
+  SUM(Ppto_UtilidadBruta) As Ppto_UtilidadBruta,
+  SUM(Ppto_Participacion_Aliado) As Ppto_Participacion_Aliado,
+  SUM(Ppto_Participacion_TERPEL) As Ppto_Participacion_TERPEL,
+  SUM(Ppto_Incentivo_Competitivo) As Ppto_Incentivo_Competitivo,
+  SUM(PptoGastos) As PptoGastos,
+  SUM(PptoMargen) As PptoMargen
+FROM Participaciones_PptosReferencia a
+INNER JOIN codUnicos_HS B
+  ON( A.Cod_Unico = B.CodigoUnico)
+GROUP BY Cod_Unico, Fecha
+ORDER BY Cod_Unico, Fecha;
+
+
+
+
+--Optimizacion
+/* DROP TABLE IF EXISTS SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_ClienteOculto;
+DROP TABLE IF EXISTS SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_Confiable;
+DROP TABLE IF EXISTS SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_CumplimientoPpto;
+DROP TABLE IF EXISTS SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_MetodosNoConvencionales ;
+DROP TABLE IF EXISTS SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_RotacionPersonal;
+DROP TABLE IF EXISTS SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_VentaCombustibles;
+DROP TABLE IF EXISTS SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion_ViveTerpel; 
+DROP TABLE IF EXISTS SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidacion1; 
+DROP TABLE IF EXISTS SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales; 
+DROP TABLE IF EXISTS SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp; 
+
+ */
+
+
+
+
+END 
+
+
+/*
+-- Evaluar valores
+SELECT * 
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidaciones` 
+WHERE oCodigoUnico = 'EDS4087'
+  AND oCalendarioKey = '2022-03-01'
+ORDER BY oCalendarioKey;
+
+
+--------------------- IMPORTANTE! CORRER UNICAMENTE PARA REINICIAR EL HISTORICO ----------------
+
+DELETE FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Liquidaciones 
+WHERE oCalendarioKey >= '2022-03-01'
+
+*/

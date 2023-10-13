@@ -1,0 +1,118 @@
+
+DECLARE vCodigoUnico STRING DEFAULT 'EDS3216';
+
+
+ WITH condiciones_TransacViveTerpel As (
+    SELECT DISTINCT
+      * 
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla = 'TransaccionesViveTerpel'
+    ORDER BY Mes_liquidacion, Rango_Inicial, Rango_Final ),
+    
+    totales_TransacViveTerpel As (
+    SELECT DISTINCT
+      Anio_Vigencia, 
+      oCodigoUnico,
+      Segmento_condicion,
+      oCalendarioKey,
+      Total_TransacFidelizadas_MesVenc As TransacFidelizadas_MesVenc
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp ),
+
+    transacViveTerpel As (
+    SELECT 
+      A.*,   
+      B.Regla As Regla_transac,	
+      CAST(B.Rango_Inicial AS NUMERIC) As Rango_Inicial_transac,	
+      CAST(B.Rango_Final AS NUMERIC) As Rango_Final_transac,	
+      CAST(B.Valor AS INT64) As Valor_transac,
+    FROM totales_TransacViveTerpel A 
+    LEFT JOIN condiciones_TransacViveTerpel B 
+      ON ( A.oCalendarioKey = B.Mes_liquidacion  )
+    ORDER BY Ano_Vigencia, oCalendarioKey, Rango_Inicial
+    ),
+
+    liquidacion_transacViveTerpel As (
+    SELECT 
+      *
+    FROM transacViveTerpel
+    WHERE TransacFidelizadas_MesVenc BETWEEN Rango_Inicial_transac AND Rango_Final_transac
+    ),
+
+
+    condiciones_ReferidosViveTerpel As (
+    SELECT DISTINCT
+      * 
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Condiciones
+    WHERE Regla = 'ReferidosViveTerpel'
+    ORDER BY Mes_liquidacion,  Rango_Inicial, Rango_Final ),
+    
+
+    totales_ReferidosViveTerpel As (
+    SELECT DISTINCT
+      Anio_Vigencia, 
+      oCodigoUnico,
+      Segmento_condicion,
+      oCalendarioKey,
+      Total_ClientesReferidos_MesVenc As ClientesReferidos_MesVenc
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp ) ,
+
+    referidosViveTerpel As (
+    SELECT 
+      A.* EXCEPT (ClientesReferidos_MesVenc),
+      A.ClientesReferidos_MesVenc,   
+      B.Regla As Regla_referidos,
+      CAST(B.Rango_Inicial AS INT64) As Rango_Inicial_referidos,	
+      CAST(B.Rango_Final AS INT64) As Rango_Final_referidos,	
+      CAST(B.Valor AS INT64) As Valor_referidos,
+    FROM totales_ReferidosViveTerpel A 
+    LEFT JOIN condiciones_ReferidosViveTerpel B
+      ON ( A.oCalendarioKey = B.Mes_liquidacion  )
+    --WHERE oCodigoUnico =  vCodigoUnico
+    ORDER BY Ano_Vigencia, oCalendarioKey, Rango_Inicial
+    ),
+    
+    liquidacion_referidosViveTerpel As (
+    SELECT  
+      * ,
+    FROM referidosViveTerpel 
+    WHERE  ClientesReferidos_MesVenc BETWEEN Rango_Inicial_referidos AND Rango_Final_referidos
+    )  ,
+    
+    liquidacion_ViveTerpel As (
+    SELECT DISTINCT
+      A.oCodigoUnico,
+      A.Segmento_condicion,
+      A.oCalendarioKey,
+      A.Total_TransacFidelizadas_MesVenc As TransacFidelizadas_MesVenc,
+      B.Regla_transac,	
+      B.Rango_Inicial_transac,	
+      B.Rango_Final_transac,	
+      IFNULL(B.Valor_transac, 0) As Valor_transac,
+      A.Total_ClientesReferidos_MesVenc As ClientesReferidos_MesVenc,
+      C.Regla_referidos,	
+      C.Rango_Inicial_referidos,	
+      C.Rango_Final_referidos,	
+      IFNULL(C.Valor_referidos, 0) As Valor_referidos,
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_Totales_temp A 
+    LEFT JOIN liquidacion_transacViveTerpel B 
+      ON (A.oCodigoUnico = B.oCodigoUnico AND
+        A.oCalendarioKey = B.oCalendarioKey AND
+        A.Segmento_condicion = B.Segmento_condicion)
+    LEFT JOIN liquidacion_referidosViveTerpel C 
+      ON (A.oCodigoUnico = C.oCodigoUnico AND
+        A.oCalendarioKey = C.oCalendarioKey AND
+        A.Segmento_condicion = C.Segmento_condicion)
+    --WHERE A.oCodigoUnico = vCodigoUnico
+    ORDER BY oCodigoUnico, oCalendarioKey, Rango_Inicial_transac 
+    )
+  
+  
+  SELECT DISTINCT
+    *,
+    Valor_transac + Valor_referidos As Participacion_ViveTerpel
+  FROM liquidacion_ViveTerpel
+  WHERE Valor_transac + Valor_referidos <> 0
+    AND oCodigoUnico =  vCodigoUnico  
+  ORDER BY oCodigoUnico, oCalendarioKey;
+
+

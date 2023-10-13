@@ -1,0 +1,78 @@
+
+
+
+DECLARE vFechaEjecucion DATE DEFAULT (SELECT CURRENT_DATE('UTC-5'));
+DECLARE vUltimoDia_Liquidaciones DATE DEFAULT '2021-12-01';
+
+
+
+WITH codUnicos_HS As (
+    SELECT DISTINCT CodigoUnico
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos
+    ORDER BY CodigoUnico),
+      
+    margen_ppto As (
+    SELECT 
+      oCodigoUnico,
+      oCalendarioKey,
+      FORMAT_DATE("%b-%Y", oCalendarioKey) As Mes_Anio,
+      PptoVolumen
+    FROM `terpel-gtic-datalake.satelite_resultados_VP_Comercial_Combustible.Margen_Presupuesto` A -- Condiciones_Costo_Margen_Franquicias
+   /*  WHERE oCodigoUnico = 'EDS1111' AND oCalendarioKey >= '2012-12-01'
+    ORDER BY oCalendarioKey */
+    INNER JOIN codUnicos_HS B
+      ON( A.oCodigoUnico = B.CodigoUnico)
+    WHERE  A.oCalendarioKey BETWEEN vUltimoDia_Liquidaciones 
+      AND vFechaEjecucion
+      --AND LAST_DAY (vFechaRecarga, MONTH)
+      --AND REGEXP_CONTAINS(UPPER(SegmentoPresupuesto),'(OPESE|MASSER|FRANQ)') 2022-04-06 DATR se modific+o por el tema de los operadores Propios
+    ORDER BY oCodigoUnico, oCalendarioKey   ) ,
+
+    segmentosHistTemp As (
+    SELECT DISTINCT
+      CodigoUnico,
+      --oCalendarioSegmento,
+      Anio_mes_segmento,
+      --Segmento_historico_maestro
+      Regla_Segmento -- 
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos` 
+    ORDER BY CodigoUnico, Regla_Segmento
+    )
+
+    SELECT DISTINCT
+      A.oCodigoUnico,   
+      A.oCalendarioKey,
+      B.Regla_Segmento,
+      SUM(PptoVolumen) As PptoVolumen
+    FROM margen_ppto A  
+    LEFT JOIN segmentosHistTemp B
+      ON (A.oCodigoUnico  = B.CodigoUnico AND A.Mes_Anio = B.Anio_mes_segmento)  
+    WHERE  oCodigoUnico = 'EDS1111'
+    GROUP BY oCodigoUnico, oCalendarioKey, B.Regla_Segmento
+    ORDER BY oCodigoUnico, oCalendarioKey;
+
+
+
+
+/*
+-- DA LOS COD UNICOS CON INFORMACION DESACTUALIZADA, DANDO LA FECHA MAXIMA ALMACENADA
+WITH codUnicos_HS As (
+    SELECT DISTINCT CodigoUnico
+    FROM SAP_resultados_VP_Comercial_Combustibles.Participaciones_HistoricoSegmentos
+    ORDER BY CodigoUnico),
+    
+    tempS As (
+  SELECT DISTINCT
+  oCodigoUnico, MAX(oCalendarioKey) As oCalendarioKey
+FROM `terpel-gtic-datalake.satelite_resultados_VP_Comercial_Combustible.Margen_Presupuesto` 
+GROUP BY oCodigoUnico
+ORDER BY oCodigoUnico
+)
+
+SELECT A.*
+FROM tempS A
+    INNER JOIN codUnicos_HS B
+      ON( A.oCodigoUnico = B.CodigoUnico)
+WHERE oCalendarioKey < '2022-05-01'
+ORDER BY oCodigoUnico;
+*/

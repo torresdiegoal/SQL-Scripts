@@ -1,0 +1,85 @@
+/* AQUI SE GENERAN LOS INVENTARIOS INICIALES PARA IDO TOCANCIPA QUE INICIAN EN 2015_OCT */
+
+
+CREATE OR REPLACE TABLE SAP_resultados_VP_Operac_Logist_Invent.IDO_Cierre_Oct2015 As
+    WITH Almacen_1 AS (
+      SELECT
+        T.Almacen,
+        tabla_almacen.Almacen AS almacenes
+      FROM
+        `terpel-gtic-datalake.SAP_datarefinada.T001L` AS T
+      JOIN
+        `terpel-gtic-datalake.SAP_archivos_maestros.IDO_Tocancipa_Maestro_Almacen` AS tabla_almacen
+      ON
+        T.Denominacion_almacen = tabla_almacen.Almacen
+      GROUP BY
+        T.Almacen,
+        almacenes ),
+
+    Temp1 As(
+      SELECT 
+        CAST(Sociedad As STRING) As oSociedadKey,
+        Centro As oCentroKey,
+        Tanque As oAlmacenKey,
+        CAST(Proveedor As STRING) oProveedorKey,
+        CAST(Cod_Producto As STRING) oProductoKey,
+        Fecha As oCalendarioKey,
+        CAST(0 AS NUMERIC) As InvPrimerDiaMes,
+        CAST(0 AS NUMERIC) As InvIni,
+        CAST(0 AS NUMERIC) As Recibo,
+        CAST(0 AS NUMERIC) As Variaciones_Recibo,
+        CAST(0 AS NUMERIC) As Despachos_Volumen_Neto_VSD60,
+        CAST(0 AS NUMERIC) As Despachos_Volumen_Bruto,
+        CAST(0 AS NUMERIC) As Expansion_Volumetrica,
+        CAST(0 AS NUMERIC) As Prestamos,
+        CAST(0 AS NUMERIC) As Variacion_de_Almacenamiento,
+        CAST(Inv_Final AS NUMERIC) As InvFinal
+      FROM `terpel-gtic-datalake.SAP_archivos_maestros.IDO_Tocancipa_InvFinal_IDOTocancipa_Inventario_Final` 
+      WHERE Fecha = '2015-10-31')
+      
+SELECT 
+  oSociedadKey,
+  oCentroKey,
+  oAlmacenKey,
+  oProveedorKey,
+  oProductoKey,
+  oCalendarioKey,
+  SUM(InvPrimerDiaMes) As InvPrimerDiaMes,
+  SUM(InvIni) As InvIni,
+  SUM(Recibo) As Recibo,
+  SUM(Variaciones_Recibo) As Variaciones_Recibo,
+  SUM(Despachos_Volumen_Neto_VSD60) As Despachos_Volumen_Neto_VSD60,
+  SUM(Despachos_Volumen_Bruto) As Despachos_Volumen_Bruto,
+  SUM(Expansion_Volumetrica) As Expansion_Volumetrica,
+  SUM(Prestamos) As Prestamos,
+  SUM(Variacion_de_Almacenamiento) As Variacion_de_Almacenamiento,
+  IFNULL(SUM(InvFinal), 0) As InvFinal,
+  SAFE_DIVIDE(SUM(Variacion_de_Almacenamiento),SUM(Despachos_Volumen_Neto_VSD60)) As FLA_Salidas,
+  SAFE_DIVIDE(SUM(Variaciones_Recibo),SUM(Recibo)) As FLR_Entradas,
+  SAFE_DIVIDE(SUM(Despachos_Volumen_Bruto),SUM(Despachos_Volumen_Neto_VSD60)) As GOV_GSV,
+  SUM(Variacion_de_Almacenamiento) + SUM(Variaciones_Recibo) As Totales,
+  SAFE_DIVIDE((SUM(Variacion_de_Almacenamiento) + SUM(Variaciones_Recibo)),SUM(Despachos_Volumen_Neto_VSD60)) As Totales_Salidas
+
+  --CASE WHEN SUM(InvFinal) IS NULL THEN CAST(0 AS NUMERIC) ELSE SUM(InvFinal) END As InvFinal
+FROM Temp1
+INNER JOIN Almacen_1
+ON Temp1.oAlmacenKey = Almacen_1.Almacen
+GROUP BY 
+  oSociedadKey,
+  oCentroKey,
+  oAlmacenKey,
+  oProveedorKey,
+  oProductoKey,
+  oCalendarioKey
+ORDER BY
+  oSociedadKey,
+  oCentroKey,
+  oAlmacenKey,
+  oProveedorKey,
+  oProductoKey ASC;
+
+
+CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_CierreMensual` As
+SELECT 
+  *
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Operac_Logist_Invent.IDO_Cierre_Oct2015`

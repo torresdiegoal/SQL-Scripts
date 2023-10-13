@@ -1,0 +1,257 @@
+
+-- Revisa valores anuales
+SELECT 
+  numEjercicio,
+  numPeriodoContable, 
+  codSociedad,
+  SUM(SaldoInicial) as SaldoInicial,
+  SUM(MovCredito) as MovCredito,
+  SUM(MovDebito) as MovDebito,
+  COUNT(*) conteo
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Fact` 
+--FROM terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_SaldosMovimientos_SI_BackUp
+WHERE numEjercicio = '2021'
+GROUP BY numEjercicio
+  ,numPeriodoContable, codSociedad
+ORDER BY numEjercicio, CAST(numPeriodoContable As INT64), codSociedad;
+
+
+-- Saldos iniciales
+SELECT numEjercicio, SUM(SaldoInicial) as sumas 
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_SaldosMovimientos_SI` 
+--FROM terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_SaldosMovimientos_SI_BackUp
+GROUP BY numEjercicio
+ORDER BY numEjercicio;
+
+
+
+--
+SELECT * 
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_TransaccionesTerceros` 
+WHERE numDocContable = '0060000002'
+  AND CodSociedad = '1000';
+
+/*
+  WHERE numDocContable = '0060000002'
+  vlrImporteReportar = 89388
+
+*/
+
+
+
+---
+SELECT DISTINCT
+ *
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Fact`
+WHERE numDocContable = '1700021488'-- AND numEjercicio = '2021'
+ORDER BY numDocContable;
+
+
+
+--
+SELECT DISTINCT
+ *
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Diferencias`
+WHERE Documento_Contable IS NULL 
+ORDER BY numDocContable;
+
+
+
+--
+CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_CifrasQlik` As 
+--CREATE OR REPLACE TABLE `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_CifrasQlik_temp2` As 
+SELECT DISTINCT
+  numEjercicio, 
+  numPeriodoContable,
+  --CAST(Documento_Contable As ) As Documento_Contable,
+  numDocContable As Documento_Contable,
+  REPLACE(Movimiento_Debito, '.', '') As Movimiento_Debito,
+  REPLACE(Movimiento_Cr__dito, '.', '') As Movimiento_Credito
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_CifrasQlik_temp`
+WHERE --numEjercicio = '2021' AND 
+  numDocContable IS NOT NULL
+  AND CAST(numDocContable As STRING) NOT IN ('','-',' ','Documento Contable')
+ORDER BY numDocContable;
+
+
+
+--
+CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Diferencias As 
+WITH CifrasGCP As (
+  SELECT DISTINCT
+    numEjercicio,
+    numPeriodoContable,
+    numDocContable,
+    --CAST(MovDebitoNivelDoc As STRING) As MovDebito,
+    SUM(MovDebitoNivelDoc) As MovDebito,
+    --CAST(MovCreditoNivelDoc As STRING) As MovCredito
+    SUM(MovCreditoNivelDoc) As MovCredito
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Fact2021`
+  WHERE numPeriodoContable = '8'
+    AND numEjercicio = '2021' 
+    AND numDocContable IS NOT NULL 
+    AND codSociedad = '1000'
+  GROUP BY numEjercicio, numPeriodoContable,numDocContable
+  ORDER BY numDocContable),
+
+  CifrasQlik As (
+  SELECT DISTINCT
+    Documento_Contable, 
+    CAST(Movimiento_Debito As NUMERIC) As MovDebito_qlik,
+    CAST(Movimiento_Credito As NUMERIC) As MovCredito_qlik
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_CifrasQlik`
+  WHERE Documento_Contable NOT IN ('','-',' ')
+  ),
+
+  CifrasQlik2 As (
+  SELECT DISTINCT
+    Documento_Contable, 
+    SUM(MovDebito_qlik) As MovDebito_qlik,
+    SUM(MovCredito_qlik) As MovCredito_qlik
+  FROM CifrasQlik
+  GROUP BY Documento_Contable
+  --WHERE Documento_Contable NOT IN ('','-',' ')
+  )
+
+SELECT DISTINCT *
+FROM CifrasGCP A
+LEFT JOIN CifrasQlik2 B
+  ON (A.numDocContable = B.Documento_Contable )
+WHERE B.Documento_Contable IS NULL 
+  OR A.numDocContable IS NULL
+  OR A.MovDebito <> B.MovDebito_qlik
+  OR A.MovCredito <> B.MovCredito_qlik
+ORDER BY numDocContable;
+
+
+
+
+
+-- Valores en qlik que no tenen DocContable 
+SELECT DISTINCT
+    numEjercicio,
+    numPeriodoContable,
+    numDocContable,
+    --CAST(MovDebitoNivelDoc As STRING) As MovDebito,
+    SUM(MovDebitoNivelDoc) As MovDebito,
+    --CAST(MovCreditoNivelDoc As STRING) As MovCredito
+    SUM(MovCreditoNivelDoc) As MovCredito
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Fact2021`
+  WHERE numPeriodoContable = '8'
+    AND numEjercicio = '2021' 
+    AND CHAR_LENGTH(numDocContable) = 1 --IS NULL 
+    AND codSociedad = '1000'
+  GROUP BY numEjercicio, numPeriodoContable,numDocContable
+  ORDER BY numDocContable;
+
+
+-- Validacion en Transacciones Terceros 
+SELECT * --Cuenta_de_mayor_SAKNR,  N__documento
+FROM `terpel-gtic-datalake.SAP_datarefinada.ZFIGLR_T100` 
+WHERE Cuenta_de_mayor_SAKNR like '1110050183%'
+  AND Ejercicio = 2021
+ORDER BY Periodo_contable ;
+
+
+-- 
+SELECT 
+  Nivel10CuentaMayor, numDocContable, MovDebitoNivelDoc 
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Fact2021`
+WHERE numPeriodoContable = '8'
+    AND numEjercicio = '2021' 
+    --AND numDocContable IS NOT NULL
+    AND Nivel10CuentaMayor = '1110050183' 
+    AND codSociedad = '1000';
+
+
+
+/*  Validacion de maestros Reporte Salida en DATACRUDA
+       - Tabla cuentasPUC
+            -  FAGL_011QT_SAP
+
+*/
+WITH Puc As(
+  SELECT DISTINCT
+    SPLIT(TXT45, ' ')[OFFSET(0)] as numCuenta,
+    UPPER( REPLACE( TXT45, SPLIT(TXT45, ' ')[OFFSET(0)], '') ) as TextoCuenta
+  FROM `terpel-gtic-datalake.SAP_datacruda.FAGL_011QT_SAP`
+  WHERE VERSN = 'TPUC' 
+    AND TXTYP = 'K' 
+    AND SPRAS = 'S'
+  ORDER BY numCuenta)
+    
+ SELECT DISTINCT
+    numCuenta,
+    FIRST_VALUE(TextoCuenta IGNORE NULLS) 
+      OVER (PARTITION BY numCuenta 
+            ORDER BY TextoCuenta ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) As TextoCuenta 
+    --TextoCuenta
+  FROM Puc
+  WHERE numCuenta LIKE '________';
+
+
+
+-- SKAT_SAP
+SELECT  
+  KTOPL AS Plan_de_cuentas,
+  SAKNR AS Cuenta_de_mayor,
+  TXT20 AS Texto_breve,
+  TXT50 AS Texto_explicativo,
+FROM `terpel-gtic-datalake.SAP_datacruda.SKAT_SAP`
+WHERE SAKNR LIKE '________' AND
+    --KTOPL = 'CACO' AND 
+    KTOPL = 'PUCT' AND 
+    SPRAS = 'S';
+
+
+
+
+/*
+CREATE OR REPLACE TABLE SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Diferencias As 
+WITH CifrasGCP As (
+  SELECT DISTINCT
+    numEjercicio,
+    numPeriodoContable,
+    numDocContable,
+    --CAST(MovDebitoNivelDoc As STRING) As MovDebito,
+    SUM(MovDebitoNivelDoc) As MovDebito,
+    --CAST(MovCreditoNivelDoc As STRING) As MovCredito
+    SUM(MovCreditoNivelDoc) As MovCredito
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_Fact2021`
+  WHERE numPeriodoContable = '8'
+    AND numEjercicio = '2021' 
+    AND numDocContable IS NOT NULL 
+    AND codSociedad = '1000'
+  GROUP BY numEjercicio, numPeriodoContable,numDocContable
+  ORDER BY numDocContable),
+
+  CifrasQlik As (
+  SELECT DISTINCT
+    Documento_Contable, 
+    CAST(Movimiento_Debito As NUMERIC) As MovDebito_qlik,
+    CAST(Movimiento_Credito As NUMERIC) As MovCredito_qlik
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Asuntos_Corp_Legal.ReporteSalida_CifrasQlik`
+  WHERE Documento_Contable NOT IN ('','-',' ')
+  ),
+
+  CifrasQlik2 As (
+  SELECT DISTINCT
+    Documento_Contable, 
+    SUM(MovDebito_qlik) As MovDebito_qlik,
+    SUM(MovCredito_qlik) As MovCredito_qlik
+  FROM CifrasQlik
+  GROUP BY Documento_Contable
+  --WHERE Documento_Contable NOT IN ('','-',' ')
+  )
+
+SELECT DISTINCT *
+FROM CifrasGCP A
+LEFT JOIN CifrasQlik2 B
+  ON (A.numDocContable = B.Documento_Contable )
+WHERE B.Documento_Contable IS NULL 
+  OR A.numDocContable IS NULL
+  OR A.MovDebito <> B.MovDebito_qlik
+  OR A.MovCredito <> B.MovCredito_qlik
+ORDER BY numDocContable;
+*/

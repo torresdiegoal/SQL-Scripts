@@ -1,0 +1,120 @@
+
+-- Granularidad mensual
+  SELECT  
+    EXTRACT(YEAR FROM oCalendarioKey) As Anio, 
+    EXTRACT(MONTH FROM oCalendarioKey) As Mes,
+    ROUND(SUM(Volumen_Vendido)) As Volumen_Vendido
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.LineaIndustria_Facturacion`
+  GROUP BY anio, Mes
+  ORDER BY anio, Mes;
+
+
+-- Granularidad diaria
+  SELECT  
+    oCalendarioKey,
+    ROUND(SUM(Volumen_Vendido)) As Volumen_Vendido
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.LineaIndustria_Facturacion`
+  WHERE EXTRACT(YEAR FROM oCalendarioKey) = 2010 AND 
+    EXTRACT(MONTH FROM oCalendarioKey) = 8
+  GROUP BY oCalendarioKey
+  ORDER BY oCalendarioKey;
+
+
+-- Granularidad por oProductoKey
+  SELECT 
+    oCalendarioKey,
+    oProductoKey,
+    ROUND(SUM(Volumen_Vendido)) As Volumen_Vendido
+  FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.LineaIndustria_Facturacion`
+  WHERE 
+    oCalendarioKey IN ('2010-08-23','2010-08-31')
+  GROUP BY oCalendarioKey, oProductoKey
+  ORDER BY oCalendarioKey, oProductoKey;
+
+
+-- Granularidad por oCentroBeneficioKey y oCentroLogisticoKey
+  WITH tempCifras As (
+    SELECT 
+        oCalendarioKey,
+        oCentroBeneficioKey,
+        oCentroLogisticoKey,
+        ROUND(SUM(Volumen_Vendido)) As Volumen_Vendido
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.LineaIndustria_Facturacion`
+    WHERE 
+        oCalendarioKey IN ('2010-08-23','2010-08-31') AND oProductoKey = '1394'
+    GROUP BY oCalendarioKey, oCentroLogisticoKey, oCentroBeneficioKey
+    ORDER BY oCalendarioKey, oCentroLogisticoKey, oCentroBeneficioKey)
+
+  SELECT  
+    oCalendarioKey,
+    oCentroBeneficioKey,
+    oCentroLogisticoKey,
+    Nombre_Centro_Logistico,
+    Volumen_Vendido
+  FROM tempCifras A
+  LEFT JOIN  `terpel-gtic-datalake.SAP_resultados.Maestro_Centro_Logistico` B
+  USING(oCentroLogisticoKey)
+  ORDER BY oCalendarioKey,  oCentroBeneficioKey, Nombre_Centro_Logistico ;
+  	
+  /* 
+  SELECT  *
+  FROM `terpel-gtic-datalake.SAP_resultados.Maestro_Centro_Logistico` 
+  WHERE Nombre_Centro_Logistico LIKE 'LA JAGU%'
+  ORDER BY oCentroLogisticoKey;
+
+  SELECT distinct  oCentroLogisticoKey 
+FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.LineaIndustria_Facturacion`
+WHERE oCalendarioKey IN ('2010-08-23','2010-08-31') AND oProductoKey = '1394'
+ORDER BY  oCentroLogisticoKey;
+  */
+
+
+-- Granularidad por Numero_Factura
+
+  WITH tempCifras As (
+    SELECT 
+        oCalendarioKey,
+        oCentroBeneficioKey,
+        oCentroLogisticoKey,
+        ROUND(SUM(Volumen_Vendido)) As Volumen_Vendido,
+        Numero_Factura
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Comercial_Combustibles.LineaIndustria_Facturacion`
+    WHERE 
+        oCalendarioKey IN ('2010-08-23','2010-08-31') AND oProductoKey = '1394'
+        AND REGEXP_CONTAINS(oCentroLogisticoKey, '^(1P|1V54)') AND REGEXP_CONTAINS(oCentroBeneficioKey, '^(124PU|124VF)') AND
+        oCanalKey = '21'
+    GROUP BY oCalendarioKey, oCentroLogisticoKey, oCentroBeneficioKey, Numero_Factura
+    ORDER BY oCalendarioKey, oCentroLogisticoKey, oCentroBeneficioKey)  
+
+  SELECT  
+    oCalendarioKey,
+    oCentroBeneficioKey,
+    oCentroLogisticoKey,
+    Nombre_Centro_Logistico,
+    Numero_Factura,
+    Volumen_Vendido
+  FROM tempCifras A
+  LEFT JOIN  `terpel-gtic-datalake.SAP_resultados.Maestro_Centro_Logistico` B
+  USING(oCentroLogisticoKey)
+  ORDER BY oCalendarioKey,  oCentroBeneficioKey, oCentroLogisticoKey, Numero_Factura ;
+
+
+
+-- Estas facturas faltan para Agosto de 2010
+
+SELECT Centro, Centro_de_beneficio, Canal_distribucion, Material, Clase_Factura, ROUND(Volumen) aS Volumen, Factura_VBELN
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.BaseFacturacion`
+    WHERE Centro_de_beneficio LIKE '124PU004' and Canal_distribucion = '21' AND Material = '1394' AND Centro LIKE '1P%'
+    order by Factura_VBELN;
+    
+    SELECT  *
+    FROM `terpel-gtic-datalake.SAP_resultados_VP_Aviacion_Marinos.BaseFacturacion`
+    WHERE REPLACE(LTRIM(REPLACE(Factura_VBELN, '0', ' ')), ' ', '0') IN ('9002571747',
+    '9002571746',
+    '9002571745',
+    '9002571744',
+    '9002572427',
+    '9002572424',
+    '9002572426'
+    --'9002572367'
+    )
